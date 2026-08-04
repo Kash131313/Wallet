@@ -1,0 +1,10 @@
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/tauri_runtime_wry-719d1d3b3bb5170f.d: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/webview.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/global_shortcut.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/clipboard.rs
+
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libtauri_runtime_wry-719d1d3b3bb5170f.rlib: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/webview.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/global_shortcut.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/clipboard.rs
+
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libtauri_runtime_wry-719d1d3b3bb5170f.rmeta: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/webview.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/global_shortcut.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/clipboard.rs
+
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/lib.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/webview.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/global_shortcut.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tauri-runtime-wry-0.14.11/src/clipboard.rs:

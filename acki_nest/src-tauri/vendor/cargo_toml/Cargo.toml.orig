@@ -1,0 +1,28 @@
+[package]
+version = "0.15.3"
+edition = "2021"
+name = "cargo_toml"
+authors = ["Kornel <kornel@geekhood.net>"]
+description = "`Cargo.toml` struct definitions for parsing with Serde"
+keywords = ["cargo", "metadata", "struct", "toml", "serde"]
+categories = ["rust-patterns", "parser-implementations"]
+homepage = "https://lib.rs/cargo_toml"
+repository = "https://gitlab.com/crates.rs/cargo_toml"
+documentation = "https://docs.rs/cargo_toml"
+license = "Apache-2.0 OR MIT"
+exclude = ["tests"]
+rust-version = "1.64"
+
+[lib]
+name = "cargo_toml"
+path = "src/cargo_toml.rs"
+
+[dependencies]
+serde = { version = "1.0.152", features = ["derive"] }
+toml = "0.7.1"
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[package.metadata.release]
+tag-prefix=""

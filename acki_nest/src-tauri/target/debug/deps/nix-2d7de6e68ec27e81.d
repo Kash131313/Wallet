@@ -1,0 +1,14 @@
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/nix-2d7de6e68ec27e81.d: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/macros.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/errno.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/fcntl.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/mod.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/signal.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/time.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/unistd.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/features.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/utsname.rs
+
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libnix-2d7de6e68ec27e81.rmeta: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/macros.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/errno.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/fcntl.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/mod.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/signal.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/time.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/unistd.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/features.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/utsname.rs
+
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/lib.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/macros.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/errno.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/fcntl.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/mod.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/signal.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/time.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/unistd.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/features.rs:
+/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/nix-0.31.3/src/sys/utsname.rs:

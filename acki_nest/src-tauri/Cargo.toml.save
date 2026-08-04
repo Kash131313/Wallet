@@ -1,0 +1,25 @@
+[package]
+name = "acki_nest"
+version = "0.1.0"
+authors = ["Your Name <you@example.com>"]
+edition = "2021"
+
+[dependencies]
+tauri = { version = "1.6.0", features = ["api-all"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.21"
+# Official TVM SDK – provides address derivation, signing and contract interaction.
+tvm-sdk = "0.3"
+# HTTP client for real GraphQL queries.
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+# (Placeholder) Real TVM SDK and HTTP client would be added here when network access[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+# is available. For now the address derivation and balance query are simple
+# deterministic stubs that do not require external crates.

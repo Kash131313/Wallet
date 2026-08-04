@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AckiNest — мульти-кошелёк Acki Nacki</title>
+<style>
+  :root {
+    --bg: #0a0e1c;
+    --bg-2: #0f1630;
+    --card: rgba(255,255,255,0.04);
+    --card-border: rgba(255,255,255,0.08);
+    --text: #eef2ff;
+    --muted: #9aa3c7;
+    --accent: #78b4ff;
+    --gold: #ffd65a;
+    --green: #3ddc97;
+    --red: #ff6b6b;
+    --radius: 16px;
+    --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+    background: radial-gradient(1200px 800px at 85% -10%, #1b2a5e 0%, transparent 60%),
+                radial-gradient(900px 700px at -10% 110%, #2a1740 0%, transparent 55%),
+                var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .app {
+    width: 100%;
+    max-width: 860px;
+    background: rgba(13,18,40,0.6);
+    border: 1px solid var(--card-border);
+    border-radius: 24px;
+    backdrop-filter: blur(14px);
+    box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+    overflow: hidden;
+  }
+  .topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--card-border);
+    background: linear-gradient(90deg, rgba(120,180,255,0.06), transparent);
+  }
+  .logo {
+    width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
+    background: conic-gradient(from 210deg, #78b4ff, #7c5cff, #ffd65a, #78b4ff);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 20px; color: #0a0e1c;
+    box-shadow: 0 4px 18px rgba(124,92,255,0.5);
+  }
+  .brand { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
+  .brand small { display: block; font-size: 11px; font-weight: 500; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+  .mode-badge {
+    margin-left: auto; font-size: 11px; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--card-border); color: var(--muted); background: rgba(255,255,255,0.03);
+  }
+  .mode-badge.online { color: var(--green); border-color: rgba(61,220,151,0.4); }
+  .mode-badge.offline { color: var(--gold); border-color: rgba(255,214,90,0.4); }
+  .lock-timer { font-size: 11px; color: var(--muted); padding: 4px 10px; border-radius: 999px; border: 1px solid var(--card-border); }
+
+  /* Вход */
+  .screen { padding: 32px 24px; }
+  .screen.unlock { max-width: 440px; margin: 0 auto; width: 100%; text-align: center; }
+  .hero { font-size: 26px; font-weight: 800; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 26px; line-height: 1.5; }
+  .field { text-align: left; margin-bottom: 16px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 600; }
+  .field input, .field textarea {
+    width: 100%; padding: 12px 14px; border-radius: 12px;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--card-border);
+    color: var(--text); font-size: 14px; outline: none; transition: border 0.15s, box-shadow 0.15s;
+    font-family: inherit;
+  }
+  .field input:focus, .field textarea:focus {
+    border-color: var(--accent); box-shadow: 0 0 0 3px rgba(120,180,255,0.15);
+  }
+  .field textarea { font-family: var(--mono); font-size: 13px; resize: vertical; min-height: 76px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 13px 18px; border: none; border-radius: 12px;
+    font-size: 14px; font-weight: 700; cursor: pointer; color: #0a0e1c;
+    background: linear-gradient(90deg, var(--accent), #7c5cff);
+    transition: transform 0.12s, box-shadow 0.2s, filter 0.15s;
+    box-shadow: 0 6px 24px rgba(120,180,255,0.25);
+  }
+  .btn:hover { transform: translateY(-1px); filter: brightness(1.08); box-shadow: 0 10px 30px rgba(120,180,255,0.35); }
+  .btn:active { transform: translateY(0); }
+  .btn.ghost {
+    background: rgba(255,255,255,0.05); color: var(--text);
+    border: 1px solid var(--card-border); box-shadow: none;
+  }
+  .btn.ghost:hover { background: rgba(255,255,255,0.09); filter: none; }
+  .btn.danger { background: rgba(255,107,107,0.12); color: var(--red); border: 1px solid rgba(255,107,107,0.3); box-shadow: none; }
+  .btn.danger:hover { background: rgba(255,107,107,0.2); filter: none; }
+  .btn.small { width: auto; padding: 7px 13px; font-size: 12px; border-radius: 9px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  /* Вкладки */
+  .tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--card-border); }
+  .tab {
+    flex: 1; padding: 13px 10px; background: none; border: none; cursor: pointer;
+    color: var(--muted); font-size: 14px; font-weight: 600; border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .count {
+    font-size: 10px; background: rgba(120,180,255,0.15); color: var(--accent);
+    border-radius: 999px; padding: 2px 7px; font-weight: 700;
+  }
+
+  .panel { padding: 22px 24px; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .section-head h2 { font-size: 15px; font-weight: 700; }
+  .section-head .btn.small { width: auto; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 12px;
+    transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+  }
+  .card:hover { border-color: rgba(120,180,255,0.3); transform: translateY(-1px); box-shadow: 0 8px 28px rgba(0,0,0,0.3); }
+  .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .card-head .name { font-weight: 700; font-size: 15px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); flex-shrink: 0; box-shadow: 0 0 8px var(--accent); }
+  .addr {
+    font-family: var(--mono); font-size: 12.5px; color: var(--muted); word-break: break-all;
+    background: rgba(0,0,0,0.25); border: 1px solid var(--card-border); border-radius: 8px;
+    padding: 7px 10px; margin-top: 4px;
+  }
+  .card-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .bal { font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--gold); }
+  .bal .unit { color: var(--muted); font-weight: 500; font-size: 11px; }
+  .bal.loading { opacity: 0.4; }
+  .empty { text-align: center; color: var(--muted); padding: 34px 10px; font-size: 13.5px; line-height: 1.6; }
+  .empty .big { font-size: 30px; margin-bottom: 8px; display: block; }
+
+  .pill { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 999px; background: rgba(255,214,90,0.12); color: var(--gold); border: 1px solid rgba(255,214,90,0.25); }
+  .participants { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+
+  .collapse { display: none; }
+  .collapse.open { display: block; animation: fade 0.2s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+  .divider { height: 1px; background: var(--card-border); margin: 20px 0; }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* Тосты */
+  .toasts { position: fixed; top: 20px; right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 1000; }
+  .toast {
+    background: rgba(16,22,49,0.95); border: 1px solid var(--card-border); border-left: 3px solid var(--accent);
+    padding: 11px 15px; border-radius: 12px; font-size: 13px; max-width: 340px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5); animation: slide 0.25s ease;
+  }
+  .toast.error { border-left-color: var(--red); }
+  .toast.ok { border-left-color: var(--green); }
+  @keyframes slide { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+
+  .loader { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+
+<div class="toasts" id="toasts"></div>
+
+<div class="app">
+  <div class="topbar">
+    <div class="logo">A</div>
+    <div class="brand">AckiNest<small>Мульти-кошелёк Acki Nacki</small></div>
+    <span class="lock-timer" id="lockTimer" style="display:none"></span>
+    <span class="mode-badge" id="modeBadge">—</span>
+  </div>
+
+  <!-- Экран входа -->
+  <div class="screen unlock" id="unlockScreen">
+    <div class="hero">Добро пожаловать 👋</div>
+    <div class="sub">AckiNest хранит ваши аккаунты в зашифрованном хранилище. <b>Мастер-пароль</b> — единственный ключ доступа, он нигде не сохраняется.</div>
+    <div class="field">
+      <label for="pwd">Мастер-пароль</label>
+      <input type="password" id="pwd" placeholder="Введите пароль" autocomplete="off" />
+    </div>
+    <button class="btn" id="unlockBtn">Разблокировать</button>
+    <div class="note" style="margin-top:14px">Если хранилище ещё не создано — оно будет создано с этим паролем.</div>
+  </div>
+
+  <!-- Главный экран -->
+  <div class="screen" id="mainScreen" style="display:none; padding:0">
+    <div class="tabs">
+      <button class="tab active" data-tab="accounts">👛 Аккаунты <span class="count" id="accCount">0</span></button>
+      <button class="tab" data-tab="multisig">🔐 Мультисиг <span class="count" id="msCount">0</span></button>
+      <button class="tab" data-tab="settings">⚙️ Настройки</button>
+    </div>
+
+    <!-- Аккаунты -->
+    <div class="panel" id="tab-accounts">
+      <div class="section-head">
+        <h2>Ваши кошельки</h2>
+        <button class="btn small" id="showAddAcc">+ Добавить</button>
+      </div>
+      <div class="collapse" id="addAccForm">
+        <div class="card">
+          <div class="field"><label for="acc-name">Имя кошелька</label><input type="text" id="acc-name" placeholder="Например: Основной" /></div>
+          <div class="field"><label for="acc-seed">Seed-фраза (24 слова)</label><textarea id="acc-seed" placeholder="слова через пробел…"></textarea></div>
+          <div class="field"><label for="acc-addr">Адрес (необязательно, если не хотите вычислять из seed)</label><input type="text" id="acc-addr" placeholder="0:hex или dapp_id::account_id" /></div>
+          <div style="display:flex; gap:8px">
+            <button class="btn" id="addAccBtn">Добавить</button>
+            <button class="btn ghost" id="cancelAddAcc">Отмена</button>
+          </div>
+        </div>
+      </div>
+      <div id="accountsList"></div>
+    </div>
+
+    <!-- Мультисиг -->
+    <div class="panel" id="tab-multisig" style="display:none">
+      <div class="section-head">
+        <h2>Мультисиг-кошельки</h2>
+        <button class="btn small" id="showAddMs">+ Создать</button>
+      </div>
+      <div class="collapse" id="addMsForm">
+        <div class="card">
+          <div class="field"><label for="ms-name">Имя</label><input type="text" id="ms-name" placeholder="Например: Семейный" /></div>
+          <div class="field"><label for="ms-address">Адрес контракта</label><input type="text" id="ms-address" placeholder="0:hex или dapp_id::account_id" /></div>
+          <div class="field"><label for="ms-participants">Участники (адреса через запятую)</label><textarea id="ms-participants" placeholder="адрес1, адрес2, адрес3"></textarea></div>
+          <div class="field"><label for="ms-required">Требуется подписей</label><input type="number" id="ms-required" min="1" value="2" /></div>
+          <div style="display:flex; gap:8px">
+            <button class="btn" id="createMsBtn">Создать</button>
+            <button class="btn ghost" id="cancelAddMs">Отмена</button>
+          </div>
+        </div>
+      </div>
+      <div id="msList"></div>
+    </div>
+
+    <!-- Настройки -->
+    <div class="panel" id="tab-settings" style="display:none">
+      <div class="section-head"><h2>Безопасность</h2></div>
+      <div class="card">
+        <div class="card-head"><div class="dot"></div><span class="name">Смена мастер-пароля</span></div>
+        <div class="field"><label for="old-pwd">Текущий пароль</label><input type="password" id="old-pwd" /></div>
+        <div class="field"><label for="new-pwd">Новый пароль</label><input type="password" id="new-pwd" /></div>
+        <button class="btn ghost" id="changePwdBtn" style="width:auto">Сменить пароль</button>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="dot"></div><span class="name">Автоблокировка</span></div>
+        <div class="field">
+          <label for="lock-min">Таймер бездействия (минуты)</label>
+          <input type="number" id="lock-min" min="1" max="60" value="5" />
+        </div>
+        <button class="btn ghost" id="applyLockBtn" style="width:auto">Применить</button>
+        <div class="note" style="margin-top:10px">После бездействия приложение потребует пароль заново.</div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="dot"></div><span class="name">О приложении</span></div>
+        <div class="note" id="aboutNote">—</div>
+      </div>
+      <div class="divider"></div>
+      <button class="btn danger" id="logoutBtn" style="width:auto">🔒 Заблокировать</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Слой вызова команд ----------
+  const inTauri = !!(window.__TAURI__ && window.__TAURI__.invoke);
+  const invoke = (cmd, args) =>
+    inTauri ? window.__TAURI__.invoke(cmd, args) : mockInvoke(cmd, args);
+
+  // Fallback для браузера (демо-режим): хранилище в localStorage.
+  function mockLoad() {
+    try { return JSON.parse(localStorage.getItem('ackinest_mock')) || { accounts: [], multisig: [] }; }
+    catch (e) { return { accounts: [], multisig: [] }; }
+  }
+  function mockSave(store) { localStorage.setItem('ackinest_mock', JSON.stringify(store)); }
+  function mockAddr() { return '0:' + Array.from({length:64}, () => '0123456789abcdef'[Math.floor(Math.random()*16)]).join(''); }
+  function mockInvoke(cmd, args) {
+    const store = mockLoad();
+    switch (cmd) {
+      case 'init_store': return Promise.resolve(true);
+      case 'list_accounts': return Promise.resolve(store.accounts);
+      case 'list_multisig_wallets': return Promise.resolve(store.multisig);
+      case 'add_account': store.accounts.push({ name: args.name, address: args.address, seed: args.seed }); mockSave(store); return Promise.resolve(null);
+      case 'remove_account': store.accounts = store.accounts.filter(a => a.name !== args.name); mockSave(store); return Promise.resolve(null);
+      case 'create_multisig_wallet': store.multisig.push({ name: args.name, address: args.address, participants: args.participants, required: args.required }); mockSave(store); return Promise.resolve(null);
+      case 'remove_multisig_wallet': store.multisig = store.multisig.filter(w => w.name !== args.name); mockSave(store); return Promise.resolve(null);
+      case 'derive_address': return Promise.resolve('0:' + args.seed.split(/\s+/).map(w => w.length.toString(16)).join('').padEnd(64, '0'));
+      case 'get_balance': return Promise.resolve('0x' + Math.floor(Math.random()*1e6).toString(16));
+      case 'change_password': return Promise.resolve(null);
+      default: return Promise.reject('Неизвестная команда: ' + cmd);
+    }
+  }
+
+  // ---------- Утилиты ----------
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function toast(msg, kind) {
+    const el = document.createElement('div');
+    el.className = 'toast ' + (kind || '');
+    el.textContent = msg;
+    $('toasts').appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, 3200);
+  }
+
+  // Баланс из hex (нано-вейлы) -> человекочитаемый Acki (1 Acki = 1e9).
+  function formatBalance(hex) {
+    if (!hex || hex === '0') return '0.00';
+    let h = String(hex).replace(/^0x/i, '');
+    if (!h) return '0.00';
+    const nano = BigInt('0x' + h);
+    const whole = nano / 1000000000n;
+    const frac = (nano % 1000000000n).toString().padStart(9, '0').slice(0, 2);
+    const grouped = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+    return grouped + '.' + frac;
+  }
+
+  function shortAddr(a) {
+    a = String(a);
+    return a.length > 16 ? a.slice(0, 8) + '…' + a.slice(-8) : a;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).then(() => toast('Адрес скопирован', 'ok')); }
+    else toast('Копирование недоступно', 'error');
+  }
+
+  // ---------- Состояние ----------
+  let password = '';
+  let lockMinutes = parseInt(localStorage.getItem('ackinest_lock') || '5', 10);
+  let lockTimer = null;
+  let lockTimeout = null;
+  let balancesCache = {};
+
+  function resetIdle() {
+    if (!password) return;
+    clearTimeout(lockTimeout);
+    lockTimeout = setTimeout(lockNow, lockMinutes * 60 * 1000);
+    updateLockLabel();
+  }
+  function updateLockLabel() {
+    const t = $('lockTimer');
+    if (!password) { t.style.display = 'none'; return; }
+    t.style.display = '';
+    const mins = Math.max(1, Math.ceil((lockTimeout - Date.now()) / 60000));
+    t.textContent = '⏱ ' + mins + ' мин';
+  }
+  function lockNow() {
+    if (!password) return;
+    password = '';
+    balancesCache = {};
+    showUnlock();
+    toast('Приложение заблокировано', 'ok');
+  }
+  ['click','keydown','mousemove','scroll','touchstart'].forEach(ev => document.addEventListener(ev, resetIdle, { passive: true }));
+
+  // ---------- Переключение экранов ----------
+  function showUnlock() {
+    $('unlockScreen').style.display = '';
+    $('mainScreen').style.display = 'none';
+    $('pwd').value = '';
+    $('pwd').focus();
+  }
+  function showMain() {
+    $('unlockScreen').style.display = 'none';
+    $('mainScreen').style.display = '';
+    refreshAll();
+  }
+
+  // ---------- Вкладки ----------
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      ['accounts','multisig','settings'].forEach(k => $('tab-' + k).style.display = k === tab.dataset.tab ? '' : 'none');
+    });
+  });
+
+  // ---------- Загрузка данных ----------
+  async function refreshAll() {
+    try {
+      const [accounts, multisig] = await Promise.all([
+        invoke('list_accounts', { password }),
+        invoke('list_multisig_wallets', { password })
+      ]);
+      $('accCount').textContent = accounts.length;
+      $('msCount').textContent = multisig.length;
+      renderAccounts(accounts);
+      renderMultisig(multisig);
+    } catch (e) {
+      toast('Ошибка загрузки: ' + e, 'error');
+    }
+  }
+
+  async function loadBalance(addr, btn, balEl) {
+    balEl.classList.add('loading');
+    balEl.textContent = '…';
+    try {
+      const raw = await invoke('get_balance', { address: addr });
+      const shown = formatBalance(raw);
+      balancesCache[addr] = shown;
+      balEl.innerHTML = shown + ' <span class="unit">ACKI</span>';
+      balEl.classList.remove('loading');
+      toast('Баланс обновлён', 'ok');
+    } catch (e) {
+      balEl.classList.remove('loading');
+      balEl.textContent = '— ошибка —';
+      toast('Не удалось получить баланс: ' + e, 'error');
+    }
+  }
+
+  function renderAccounts(accounts) {
+    const list = $('accountsList');
+    list.innerHTML = '';
+    if (!accounts.length) {
+      list.innerHTML = '<div class="empty"><span class="big">👛</span>Пока нет аккаунтов.<br/>Нажмите «+ Добавить», чтобы импортировать кошелёк по seed-фразе.</div>';
+      return;
+    }
+    accounts.forEach(acc => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const cached = balancesCache[acc.address];
+      card.innerHTML = `
+        <div class="card-head">
+          <div class="dot"></div>
+          <span class="name">${esc(acc.name)}</span>
+          <span class="bal" style="margin-left:auto" data-bal="${esc(acc.address)}">${cached ? cached + ' <span class="unit">ACKI</span>' : '—'}</span>
+        </div>
+        <div class="addr" title="${esc(acc.address)}">${esc(shortAddr(acc.address))}</div>
+        <div class="card-actions">
+          <button class="btn small ghost" data-act="bal" data-addr="${esc(acc.address)}">⟳ Баланс</button>
+          <button class="btn small ghost" data-act="copy" data-addr="${esc(acc.address)}">⧉ Копировать</button>
+          <button class="btn small danger" data-act="del" data-name="${esc(acc.name)}">Удалить</button>
+        </div>`;
+      list.appendChild(card);
+    });
+  }
+
+  function renderMultisig(wallets) {
+    const list = $('msList');
+    list.innerHTML = '';
+    if (!wallets.length) {
+      list.innerHTML = '<div class="empty"><span class="big">🔐</span>Мультисиг-кошельков нет.<br/>Создайте первый, указав участников и порог подписей.</div>';
+      return;
+    }
+    wallets.forEach(w => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="card-head">
+          <div class="dot"></div>
+          <span class="name">${esc(w.name)}</span>
+          <span class="pill" style="margin-left:auto">${w.required}/${w.participants.length}</span>
+        </div>
+        <div class="addr" title="${esc(w.address)}">${esc(shortAddr(w.address))}</div>
+        <div class="participants">${esc(w.participants.join(', '))}</div>
+        <div class="card-actions">
+          <button class="btn small ghost" data-act="copy" data-addr="${esc(w.address)}">⧉ Копировать</button>
+          <button class="btn small danger" data-act="delms" data-name="${esc(w.name)}">Удалить</button>
+        </div>`;
+      list.appendChild(card);
+    });
+  }
+
+  // Делегирование кликов по карточкам
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (act === 'bal') {
+      const card = btn.closest('.card');
+      const balEl = card.querySelector('.bal');
+      loadBalance(btn.dataset.addr, btn, balEl);
+    } else if (act === 'copy') {
+      copyText(btn.dataset.addr);
+    } else if (act === 'del') {
+      removeAccount(btn.dataset.name, btn);
+    } else if (act === 'delms') {
+      removeMultisig(btn.dataset.name, btn);
+    }
+  });
+
+  async function removeAccount(name, btn) {
+    if (!confirm('Удалить аккаунт «' + name + '»? (seed-фраза будет утеряна)')) return;
+    btn.disabled = true;
+    try {
+      await invoke('remove_account', { password, name });
+      toast('Аккаунт удалён', 'ok');
+      refreshAll();
+    } catch (e) { toast('Ошибка: ' + e, 'error'); btn.disabled = false; }
+  }
+  async function removeMultisig(name, btn) {
+    if (!confirm('Удалить мультисиг «' + name + '»?')) return;
+    btn.disabled = true;
+    try {
+      await invoke('remove_multisig_wallet', { password, name });
+      toast('Мультисиг удалён', 'ok');
+      refreshAll();
+    } catch (e) { toast('Ошибка: ' + e, 'error'); btn.disabled = false; }
+  }
+
+  // ---------- Разблокировка ----------
+  $('unlockBtn').addEventListener('click', unlock);
+  $('pwd').addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
+
+  async function unlock() {
+    const p = $('pwd').value;
+    if (!p.trim()) { toast('Введите пароль', 'error'); return; }
+    $('unlockBtn').disabled = true;
+    try {
+      await invoke('init_store', { password: p });
+      password = p;
+      showMain();
+      toast('Хранилище разблокировано', 'ok');
+    } catch (e) {
+      toast('Неверный пароль или ошибка: ' + e, 'error');
+    } finally {
+      $('unlockBtn').disabled = false;
+    }
+  }
+
+  // ---------- Добавление аккаунта ----------
+  $('showAddAcc').addEventListener('click', () => toggleCollapse('addAccForm'));
+  $('cancelAddAcc').addEventListener('click', () => closeCollapse('addAccForm'));
+  function toggleCollapse(id) { $(id).classList.toggle('open'); }
+  function closeCollapse(id) { $(id).classList.remove('open'); }
+
+  $('addAccBtn').addEventListener('click', async () => {
+    const name = $('acc-name').value.trim();
+    const seed = $('acc-seed').value.trim();
+    const manual = $('acc-addr').value.trim();
+    if (!name) { toast('Введите имя кошелька', 'error'); return; }
+    if (!seed && !manual) { toast('Введите seed-фразу или адрес', 'error'); return; }
+    $('addAccBtn').disabled = true;
+    try {
+      let address = manual;
+      if (!address) {
+        address = await invoke('derive_address', { seed });
+      }
+      await invoke('add_account', { password, name, address, seed });
+      toast('Аккаунт «' + name + '» добавлен', 'ok');
+      $('acc-name').value = ''; $('acc-seed').value = ''; $('acc-addr').value = '';
+      closeCollapse('addAccForm');
+      refreshAll();
+    } catch (e) { toast('Ошибка: ' + e, 'error'); }
+    finally { $('addAccBtn').disabled = false; }
+  });
+
+  // ---------- Мультисиг ----------
+  $('showAddMs').addEventListener('click', () => toggleCollapse('addMsForm'));
+  $('cancelAddMs').addEventListener('click', () => closeCollapse('addMsForm'));
+  $('createMsBtn').addEventListener('click', async () => {
+    const name = $('ms-name').value.trim();
+    const address = $('ms-address').value.trim();
+    const participants = $('ms-participants').value.split(',').map(s => s.trim()).filter(Boolean);
+    const required = parseInt($('ms-required').value, 10);
+    if (!name || !address || !participants.length) { toast('Заполните имя, адрес и участников', 'error'); return; }
+    if (!required || required < 1) { toast('Некорректное число подписей', 'error'); return; }
+    $('createMsBtn').disabled = true;
+    try {
+      await invoke('create_multisig_wallet', { password, name, address, participants, required });
+      toast('Мультисиг «' + name + '» создан', 'ok');
+      $('ms-name').value = ''; $('ms-address').value = ''; $('ms-participants').value = ''; $('ms-required').value = '2';
+      closeCollapse('addMsForm');
+      refreshAll();
+    } catch (e) { toast('Ошибка: ' + e, 'error'); }
+    finally { $('createMsBtn').disabled = false; }
+  });
+
+  // ---------- Настройки ----------
+  $('changePwdBtn').addEventListener('click', async () => {
+    const oldP = $('old-pwd').value;
+    const newP = $('new-pwd').value;
+    if (!oldP || !newP) { toast('Заполните оба поля', 'error'); return; }
+    $('changePwdBtn').disabled = true;
+    try {
+      await invoke('change_password', { oldPassword: oldP, newPassword: newP });
+      password = newP;
+      $('old-pwd').value = ''; $('new-pwd').value = '';
+      toast('Пароль изменён', 'ok');
+    } catch (e) { toast('Ошибка: ' + e, 'error'); }
+    finally { $('changePwdBtn').disabled = false; }
+  });
+
+  $('applyLockBtn').addEventListener('click', () => {
+    const v = parseInt($('lock-min').value, 10);
+    if (!v || v < 1) { toast('Некорректное значение', 'error'); return; }
+    lockMinutes = v;
+    localStorage.setItem('ackinest_lock', String(v));
+    resetIdle();
+    toast('Таймер автоблокировки: ' + v + ' мин', 'ok');
+  });
+
+  $('logoutBtn').addEventListener('click', lockNow);
+
+  // ---------- Инициализация ----------
+  const badge = $('modeBadge');
+  if (inTauri) {
+    badge.textContent = '● mainnet';
+    badge.classList.add('online');
+  } else {
+    badge.textContent = '● демо-режим';
+    badge.classList.add('offline');
+  }
+  $('aboutNote').textContent = inTauri
+    ? 'Сборка Tauri с реальным доступом к mainnet Acki Nacki (GraphQL).'
+    : 'Демо-режим в браузере: данные хранятся локально, баланс — случайный. Запустите через Tauri для реальной сети.';
+  $('lock-min').value = lockMinutes;
+  $('lockTimer').style.display = 'none';
+  showUnlock();
+})();
+</script>
+</body>
+</html>

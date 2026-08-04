@@ -1,0 +1,33 @@
+{
+  "package": {
+    "productName": "AckiNest",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": true
+    },
+    "bundle": {
+      "active": true,
+      "identifier": "com.ackinacki.acki_nest",
+      "targets": "all"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "url": "index.html",
+        "width": 900,
+        "height": 700,
+        "resizable": true,
+        "title": "AckiNest – мульти‑кошелёк Acki Nacki"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "build": {
+    "distDir": "../dist",
+    "devPath": "http://localhost:4000"
+  }
+}

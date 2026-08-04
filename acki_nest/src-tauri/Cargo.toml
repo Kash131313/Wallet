@@ -1,0 +1,30 @@
+[package]
+name = "acki_nest"
+version = "0.1.0"
+authors = ["Your Name <you@example.com>"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6.0", features = ["api-all"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.21"
+# Official TVM SDK – provides address derivation, signing and contract interaction.
+tvm-sdk = { path = "../../tvm-sdk", optional = true }
+# HTTP client for real GraphQL queries.
+reqwest = { version = "0.11", features = ["blocking", "json"], optional = true }
+# (Placeholder) Real TVM SDK and HTTP client would be added here when network access
+# is available. For now the address derivation and balance query are simple
+# deterministic stubs that do not require external crates.
+
+[features]
+# By default we do not enable optional heavy dependencies – the project builds without network.
+default = []
+# Enable real blockchain SDK and HTTP client.
+real = ["tvm-sdk", "reqwest"]

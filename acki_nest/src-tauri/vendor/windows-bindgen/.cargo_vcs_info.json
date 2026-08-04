@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "42f05aa40210b22bfdb0d7b837525998d128131a"
+  },
+  "path_in_vcs": "crates/libs/bindgen"
+}
