@@ -1,6 +1,6 @@
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/native_tls-fab36a532ff281f9.d: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/native-tls-0.2.18/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/native-tls-0.2.18/src/imp/security_framework.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/native_tls-fab36a532ff281f9.d: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/native-tls/src/lib.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/native-tls/src/imp/security_framework.rs
 
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libnative_tls-fab36a532ff281f9.rmeta: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/native-tls-0.2.18/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/native-tls-0.2.18/src/imp/security_framework.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libnative_tls-fab36a532ff281f9.rmeta: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/native-tls/src/lib.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/native-tls/src/imp/security_framework.rs
 
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/native-tls-0.2.18/src/lib.rs:
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/native-tls-0.2.18/src/imp/security_framework.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/native-tls/src/lib.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/native-tls/src/imp/security_framework.rs:

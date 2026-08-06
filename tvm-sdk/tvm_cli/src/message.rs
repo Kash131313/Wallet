@@ -1,0 +1,289 @@
+// Copyright 2018-2021 TON DEV SOLUTIONS LTD.
+//
+// Licensed under the SOFTWARE EVALUATION License (the "License"); you may not
+// use this file except in compliance with the License.
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific TON DEV software governing permissions and
+// limitations under the License.
+
+use std::str::FromStr;
+
+use chrono::Local;
+use chrono::TimeZone;
+use serde_json::json;
+use tvm_client::abi::Abi;
+use tvm_client::abi::CallSet;
+use tvm_client::abi::FunctionHeader;
+use tvm_client::abi::ParamsOfEncodeMessage;
+use tvm_client::abi::Signer;
+use tvm_client::abi::encode_message;
+use tvm_types::base64_decode;
+
+use crate::config::Config;
+use crate::crypto::load_keypair;
+use crate::helpers::SdkAddress;
+use crate::helpers::TonClient;
+use crate::helpers::create_client_local;
+use crate::helpers::load_abi;
+use crate::helpers::now;
+
+pub struct EncodedMessage {
+    pub message_id: String,
+    pub message: String,
+    pub expire: Option<u32>,
+    pub address: String,
+}
+
+pub async fn prepare_message(
+    ton: TonClient,
+    addr: &str,
+    abi: Abi,
+    method: &str,
+    params: &str,
+    header: Option<FunctionHeader>,
+    keys: Option<String>,
+    is_json: bool,
+) -> Result<EncodedMessage, String> {
+    if !is_json {
+        println!("Generating external inbound message...");
+    }
+
+    let msg_params = prepare_message_params(addr, abi, method, params, header.clone(), keys)?;
+
+    let msg = encode_message(ton, msg_params)
+        .await
+        .map_err(|e| format!("failed to create inbound message: {}", e))?;
+
+    Ok(EncodedMessage {
+        message: msg.message,
+        message_id: msg.message_id,
+        expire: header.and_then(|h| h.expire),
+        address: addr.to_owned(),
+    })
+}
+
+pub fn prepare_message_params(
+    addr: &str,
+    abi: Abi,
+    method: &str,
+    params: &str,
+    header: Option<FunctionHeader>,
+    keys: Option<String>,
+) -> Result<ParamsOfEncodeMessage, String> {
+    let keys = keys.map(|k| load_keypair(&k)).transpose()?;
+    let params = serde_json::from_str(params)
+        .map_err(|e| format!("arguments are not in json format: {}", e))?;
+
+    let call_set =
+        Some(CallSet { function_name: method.into(), input: Some(params), header: header.clone() });
+
+    // Accept the extended dapp_id::account_id form used by tvm-cli and
+    // collapse it to the standard <workchain>:<hex> address expected by
+    // the SDK's message encoder. The dapp_id is consumed only by the
+    // SDK call layer; the on-chain destination address never carries it.
+    let sdk = SdkAddress::from_str(addr).map_err(|e| format!("invalid address `{addr}`: {e}"))?;
+    // The strict parser guarantees account_id is bare 64-hex; prepend workchain 0.
+    let dst = format!("0:{}", sdk.account_id);
+
+    Ok(ParamsOfEncodeMessage {
+        abi,
+        address: Some(dst),
+        call_set,
+        signer: if let Some(keys) = keys { Signer::Keys { keys } } else { Signer::None },
+        ..Default::default()
+    })
+}
+
+pub fn print_encoded_message(msg: &EncodedMessage, is_json: bool) {
+    let expire = if msg.expire.is_some() {
+        let expire_at = Local.timestamp_opt(msg.expire.unwrap() as i64, 0).single().unwrap();
+        expire_at.to_rfc2822()
+    } else {
+        "unknown".to_string()
+    };
+    if !is_json {
+        println!();
+        println!("MessageId: {}", msg.message_id);
+        println!("Expire at: {}", expire);
+    } else {
+        println!("  \"MessageId\": \"{}\",", msg.message_id);
+        println!("  \"Expire at\": \"{}\",", expire);
+    }
+}
+
+pub fn pack_message(msg: &EncodedMessage, method: &str, is_raw: bool) -> Result<Vec<u8>, String> {
+    let res = if is_raw {
+        base64_decode(&msg.message).map_err(|e| format!("failed to decode message: {}", e))?
+    } else {
+        let json_msg = json!({
+            "msg": {
+                "message_id": msg.message_id,
+                "message": msg.message,
+                "expire": msg.expire,
+                "address": msg.address,
+            },
+            "method": method,
+        });
+        serde_json::to_string(&json_msg)
+            .map_err(|e| format!("failed to serialize message: {}", e))?
+            .into_bytes()
+    };
+    Ok(res)
+}
+
+pub fn unpack_message(str_msg: &str) -> Result<(EncodedMessage, String), String> {
+    let bytes = hex::decode(str_msg).map_err(|e| format!("couldn't unpack message: {}", e))?;
+
+    let str_msg =
+        std::str::from_utf8(&bytes).map_err(|e| format!("message is corrupted: {}", e))?;
+
+    let json_msg: serde_json::Value =
+        serde_json::from_str(str_msg).map_err(|e| format!("couldn't decode message: {}", e))?;
+
+    let method =
+        json_msg["method"].as_str().ok_or(r#"couldn't find "method" key in message"#)?.to_owned();
+    let message_id = json_msg["msg"]["message_id"]
+        .as_str()
+        .ok_or(r#"couldn't find "message_id" key in message"#)?
+        .to_owned();
+    let message = json_msg["msg"]["message"]
+        .as_str()
+        .ok_or(r#"couldn't find "message" key in message"#)?
+        .to_owned();
+    let expire = json_msg["msg"]["expire"].as_u64().map(|x| x as u32);
+    let address = json_msg["msg"]["address"]
+        .as_str()
+        .ok_or(r#"couldn't find "address" key in message"#)?
+        .to_owned();
+
+    let msg = EncodedMessage { message_id, message, expire, address };
+    Ok((msg, method))
+}
+
+pub async fn generate_message(
+    config: &Config,
+    addr: &str,
+    abi: &str,
+    method: &str,
+    params: &str,
+    keys: Option<String>,
+    lifetime: u32,
+    is_raw: bool,
+    output: Option<&str>,
+    timestamp: Option<u64>,
+) -> Result<(), String> {
+    let ton = create_client_local()?;
+
+    let ton_addr = SdkAddress::from_str(addr)
+        .map_err(|e| format!("failed to parse address: {}", e))?
+        .to_string();
+
+    let abi = load_abi(abi, config).await?;
+
+    let expire_at = lifetime + timestamp.map(|ms| (ms / 1000) as u32).unwrap_or(now());
+    let header = FunctionHeader { expire: Some(expire_at), time: timestamp, ..Default::default() };
+
+    let msg = prepare_message(
+        ton.clone(),
+        &ton_addr,
+        abi,
+        method,
+        params,
+        Some(header),
+        keys,
+        config.is_json,
+    )
+    .await?;
+
+    display_generated_message(&msg, method, is_raw, output, config.is_json)?;
+
+    Ok(())
+}
+
+pub fn display_generated_message(
+    msg: &EncodedMessage,
+    method: &str,
+    is_raw: bool,
+    output: Option<&str>,
+    is_json: bool,
+) -> Result<(), String> {
+    if is_json {
+        println!("{{");
+    }
+    print_encoded_message(msg, is_json);
+
+    let msg_bytes = pack_message(msg, method, is_raw)?;
+    if output.is_some() {
+        let out_file = output.unwrap();
+        std::fs::write(out_file, msg_bytes)
+            .map_err(|e| format!("cannot write message to file: {}", e))?;
+        if !is_json {
+            println!("Message saved to file {}", out_file);
+        } else {
+            println!("  \"Message\": \"saved to file {}\"", out_file);
+        }
+    } else {
+        let msg_hex = hex::encode(&msg_bytes);
+        if !is_json {
+            println!("Message: {}", msg_hex);
+            println!();
+            qr2term::print_qr(msg_hex).map_err(|e| format!("failed to print QR code: {}", e))?;
+            println!();
+        } else {
+            println!("  \"Message\": \"{}\"", msg_hex);
+        }
+    }
+    if is_json {
+        println!("}}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tvm_client::abi::Abi;
+
+    use super::prepare_message_params;
+
+    const DAPP_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ACCOUNT_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    // Minimal valid ABI JSON. prepare_message_params only stores the Abi and
+    // does not parse it (the encoder, which we never call here, would), so a
+    // trivial document is sufficient and keeps the test free of file/network IO.
+    const MINIMAL_ABI: &str = r#"{"ABI version":2,"functions":[],"events":[],"data":[]}"#;
+
+    #[test]
+    fn prepare_message_params_collapses_dapp_account_to_workchain_address() {
+        let addr = format!("{DAPP_ID}::{ACCOUNT_ID}");
+        let params = prepare_message_params(
+            &addr,
+            Abi::Json(MINIMAL_ABI.to_string()),
+            "method",
+            "{}",
+            None,
+            None,
+        )
+        .expect("dapp_id::account_id form must be accepted by the strict parser");
+
+        // The dapp_id is dropped; the on-chain destination is `0:<account_id>`.
+        assert_eq!(params.address.as_deref(), Some(format!("0:{ACCOUNT_ID}").as_str()));
+    }
+
+    #[test]
+    fn prepare_message_params_rejects_bare_account_id() {
+        let err = prepare_message_params(
+            ACCOUNT_ID,
+            Abi::Json(MINIMAL_ABI.to_string()),
+            "method",
+            "{}",
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+}

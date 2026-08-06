@@ -1,9 +1,9 @@
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/socket2-76877aa4c27e5691.d: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockaddr.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/socket.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockref.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sys/unix.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/socket2-76877aa4c27e5691.d: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/lib.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sockaddr.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/socket.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sockref.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sys/unix.rs
 
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libsocket2-76877aa4c27e5691.rmeta: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/lib.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockaddr.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/socket.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockref.rs /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sys/unix.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libsocket2-76877aa4c27e5691.rmeta: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/lib.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sockaddr.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/socket.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sockref.rs /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sys/unix.rs
 
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/lib.rs:
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockaddr.rs:
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/socket.rs:
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockref.rs:
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sys/unix.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/lib.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sockaddr.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/socket.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sockref.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/socket2/src/sys/unix.rs:

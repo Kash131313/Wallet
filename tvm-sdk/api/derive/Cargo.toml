@@ -1,0 +1,19 @@
+[package]
+name = "api_derive"
+#
+version.workspace = true
+rust-version.workspace = true
+#
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+api_info = { path = "../info" }
+proc-macro2.workspace = true
+quote.workspace = true
+serde_json.workspace = true
+syn = { features = ["full"], version = "1.0" }
+
+[lib]
+proc-macro = true

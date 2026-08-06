@@ -1,0 +1,1753 @@
+// Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+//
+// Licensed under the SOFTWARE EVALUATION License (the "License"); you may not
+// use this file except in compliance with the License.  You may obtain a copy
+// of the License at:
+//
+// https://www.ton.dev/licenses
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific TON DEV software governing permissions and
+// limitations under the License.
+
+use std::fs::read;
+use std::path::Path;
+
+use num::BigInt;
+use pretty_assertions::assert_eq;
+#[cfg(feature = "ton")]
+use tvm_api::IntoBoxed;
+#[cfg(feature = "ton")]
+use tvm_api::ton::ton_node::rempmessagestatus;
+use tvm_types::SliceData;
+use tvm_types::base64_decode;
+
+use super::*;
+
+include!("test_common.rs");
+
+fn assert_json_eq_file(json: &str, name: &str) {
+    let expected =
+        std::fs::read_to_string(format!("src/tests/data/{}-ethalon.json", name)).unwrap();
+    assert_json_eq(json, &expected, name);
+}
+
+fn assert_json_eq_with_fields(
+    actual: String,
+    expected: &str,
+    fields: &[(&str, serde_json::Value)],
+) {
+    let actual = serde_json::from_str::<serde_json::Value>(&actual).unwrap();
+    let mut expected = serde_json::from_str::<serde_json::Value>(expected).unwrap();
+    {
+        let expected = expected.as_object_mut().unwrap();
+        for (field, value) in fields {
+            expected.insert((*field).to_string(), value.clone());
+        }
+    }
+    assert_eq!(actual, expected);
+}
+
+fn transaction_in_msg_hash(transaction: &Transaction) -> String {
+    transaction.in_msg.as_ref().unwrap().hash().as_hex_string()
+}
+
+fn transaction_out_msg_hashes(transaction: &Transaction) -> Vec<String> {
+    let mut out_ids = Vec::new();
+    transaction
+        .out_msgs
+        .iterate_slices(|slice| {
+            if let Some(cell) = slice.reference_opt(0) {
+                out_ids.push(cell.repr_hash().as_hex_string());
+            }
+            Ok(true)
+        })
+        .unwrap();
+    out_ids
+}
+
+#[test]
+fn test_account_into_json_without_hash_0() {
+    let account = generate_test_account_by_init_code_hash(false);
+    let boc = account.write_to_bytes().unwrap();
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: None,
+        boc,
+        boc1: None,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account("id", &sender).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgEBFgEA9gAEfdxMGQuAAACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+RZAe+AdbzRWLeAAAAAAAAAACi6Q7dAB73wAkEAwEBQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgCAA8/////////9AAPP/8f//////QBDz/////////0BQEPP/////////QGAQ8/P///////9AcBDw/////////0CAAPP/8///////QCA87AEQoCASAOCwIBIA0MAAcHMS3JAAUEBLECASAQDwAFBAPpAAUEAyECASAVEgIBIBQTAAUEAlkAAwORAAVQskA=",
+  "last_paid": 123456789,
+  "bits_dec": "991",
+  "bits": "23df",
+  "cells_dec": "22",
+  "cells": "116",
+  "public_cells_dec": "0",
+  "public_cells": "00",
+  "due_payment_dec": "111",
+  "due_payment": "016f",
+  "last_trans_lt_dec": "0",
+  "last_trans_lt": "00",
+  "balance_dec": "100000000000",
+  "balance": "09174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value_dec": "100",
+      "value": "0164"
+    },
+    {
+      "currency": 2,
+      "value_dec": "200",
+      "value": "01c8"
+    },
+    {
+      "currency": 3,
+      "value_dec": "300",
+      "value": "0212c"
+    },
+    {
+      "currency": 4,
+      "value_dec": "400",
+      "value": "02190"
+    },
+    {
+      "currency": 5,
+      "value_dec": "500",
+      "value": "021f4"
+    },
+    {
+      "currency": 6,
+      "value_dec": "600",
+      "value": "02258"
+    },
+    {
+      "currency": 7,
+      "value_dec": "10000100",
+      "value": "059896e4"
+    }
+  ],
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBBQEANgABDz/////////0AQEPP/////////QCAQ8/P///////9AMBDw/////////0BAAPP/8///////Q=",
+  "code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a",
+  "data": "te6ccgEBAQEACgAADz//H//////0",
+  "data_hash": "47cc6bba530c25a982969baf59254598715aecb5b9d14531d96d24d8a623dd93",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgBAA8/////////9A==",
+  "library_hash": "4359e3721d98903035218ff07d3df30d0ce59d224abd2d7b0bfe65423fb0f67f",
+  "acc_type": 1
+}"#
+    );
+}
+
+#[test]
+fn test_account_into_json_with_hash_0() {
+    let account = generate_test_account_by_init_code_hash(true);
+    let boc = account.write_to_bytes().unwrap();
+    let mut builder = BuilderData::new();
+    account.write_original_format(&mut builder).unwrap();
+    let boc1 = Some(write_boc(&builder.into_cell().unwrap()).unwrap());
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: None,
+        boc,
+        boc1,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account("id", &sender).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgECFgEAARYABL0biYMhcAAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8iyBOAA63misW8AAAAAAAAAAFF0h26AD3vnhQLJ5DbtSnn85qIDL3M45rqbL2ylzSoeYveX/SqwkVAkEAwEBQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgCAA8/////////9AAPP/8f//////QBDz/////////0BQEPP/////////QGAQ8/P///////9AcBDw/////////0CAAPP/8///////QCA87AEQoCASAOCwIBIA0MAAcHMS3JAAUEBLECASAQDwAFBAPpAAUEAyECASAVEgIBIBQTAAUEAlkAAwORAAVQskA=",
+  "boc1": "te6ccgEBFgEA9gAEfdxMGQuAAACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+RZAnAAdbzRWLeAAAAAAAAAACi6Q7dAB73wAkEAwEBQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgCAA8/////////9AAPP/8f//////QBDz/////////0BQEPP/////////QGAQ8/P///////9AcBDw/////////0CAAPP/8///////QCA87AEQoCASAOCwIBIA0MAAcHMS3JAAUEBLECASAQDwAFBAPpAAUEAyECASAVEgIBIBQTAAUEAlkAAwORAAVQskA=",
+  "init_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a",
+  "last_paid": 123456789,
+  "bits_dec": "1248",
+  "bits": "24e0",
+  "cells_dec": "22",
+  "cells": "116",
+  "public_cells_dec": "0",
+  "public_cells": "00",
+  "due_payment_dec": "111",
+  "due_payment": "016f",
+  "last_trans_lt_dec": "0",
+  "last_trans_lt": "00",
+  "balance_dec": "100000000000",
+  "balance": "09174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value_dec": "100",
+      "value": "0164"
+    },
+    {
+      "currency": 2,
+      "value_dec": "200",
+      "value": "01c8"
+    },
+    {
+      "currency": 3,
+      "value_dec": "300",
+      "value": "0212c"
+    },
+    {
+      "currency": 4,
+      "value_dec": "400",
+      "value": "02190"
+    },
+    {
+      "currency": 5,
+      "value_dec": "500",
+      "value": "021f4"
+    },
+    {
+      "currency": 6,
+      "value_dec": "600",
+      "value": "02258"
+    },
+    {
+      "currency": 7,
+      "value_dec": "10000100",
+      "value": "059896e4"
+    }
+  ],
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBBQEANgABDz/////////0AQEPP/////////QCAQ8/P///////9AMBDw/////////0BAAPP/8///////Q=",
+  "code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a",
+  "data": "te6ccgEBAQEACgAADz//H//////0",
+  "data_hash": "47cc6bba530c25a982969baf59254598715aecb5b9d14531d96d24d8a623dd93",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgBAA8/////////9A==",
+  "library_hash": "4359e3721d98903035218ff07d3df30d0ce59d224abd2d7b0bfe65423fb0f67f",
+  "acc_type": 1
+}"#
+    );
+}
+
+#[test]
+fn test_account_into_json_q() {
+    let account = generate_test_account_by_init_code_hash(false);
+    let boc = account.write_to_bytes().unwrap();
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: None,
+        boc,
+        boc1: None,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account_ex("id", &sender, SerializationMode::QServer).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgEBFgEA9gAEfdxMGQuAAACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+RZAe+AdbzRWLeAAAAAAAAAACi6Q7dAB73wAkEAwEBQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgCAA8/////////9AAPP/8f//////QBDz/////////0BQEPP/////////QGAQ8/P///////9AcBDw/////////0CAAPP/8///////QCA87AEQoCASAOCwIBIA0MAAcHMS3JAAUEBLECASAQDwAFBAPpAAUEAyECASAVEgIBIBQTAAUEAlkAAwORAAVQskA=",
+  "last_paid": 123456789,
+  "bits": "0x3df",
+  "cells": "0x16",
+  "public_cells": "0x0",
+  "due_payment": "0x6f",
+  "last_trans_lt": "0x0",
+  "balance": "0x174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value": "0x64"
+    },
+    {
+      "currency": 2,
+      "value": "0xc8"
+    },
+    {
+      "currency": 3,
+      "value": "0x12c"
+    },
+    {
+      "currency": 4,
+      "value": "0x190"
+    },
+    {
+      "currency": 5,
+      "value": "0x1f4"
+    },
+    {
+      "currency": 6,
+      "value": "0x258"
+    },
+    {
+      "currency": 7,
+      "value": "0x9896e4"
+    }
+  ],
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBBQEANgABDz/////////0AQEPP/////////QCAQ8/P///////9AMBDw/////////0BAAPP/8///////Q=",
+  "code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a",
+  "data": "te6ccgEBAQEACgAADz//H//////0",
+  "data_hash": "47cc6bba530c25a982969baf59254598715aecb5b9d14531d96d24d8a623dd93",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgBAA8/////////9A==",
+  "library_hash": "4359e3721d98903035218ff07d3df30d0ce59d224abd2d7b0bfe65423fb0f67f",
+  "acc_type": 1,
+  "acc_type_name": "Active"
+}"#
+    );
+}
+
+#[test]
+fn test_frozen_account_into_json_0() {
+    let mut account = generate_test_account_by_init_code_hash(false);
+    let cloned_account = account.clone();
+    account.try_freeze().unwrap();
+    account.update_storage_stat().unwrap();
+    let boc = account.write_to_bytes().unwrap();
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: cloned_account.get_code_hash(),
+        boc,
+        boc1: None,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account("id", &sender).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgEBDgEAogABudxMGQuAAACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+Q5AQ6AdbzRWLeAAAAAAAAAACi6Q7dABdObwUyRFy3kg41ItCU5XanJx0dk6e0bxwNLsS2/h0EUgECA87ACQICASAGAwIBIAUEAAcHMS3JAAUEBLECASAIBwAFBAPpAAUEAyECASANCgIBIAwLAAUEAlkAAwORAAVQskA=",
+  "last_paid": 123456789,
+  "bits_dec": "541",
+  "bits": "221d",
+  "cells_dec": "14",
+  "cells": "0e",
+  "public_cells_dec": "0",
+  "public_cells": "00",
+  "due_payment_dec": "111",
+  "due_payment": "016f",
+  "last_trans_lt_dec": "0",
+  "last_trans_lt": "00",
+  "balance_dec": "100000000000",
+  "balance": "09174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value_dec": "100",
+      "value": "0164"
+    },
+    {
+      "currency": 2,
+      "value_dec": "200",
+      "value": "01c8"
+    },
+    {
+      "currency": 3,
+      "value_dec": "300",
+      "value": "0212c"
+    },
+    {
+      "currency": 4,
+      "value_dec": "400",
+      "value": "02190"
+    },
+    {
+      "currency": 5,
+      "value_dec": "500",
+      "value": "021f4"
+    },
+    {
+      "currency": 6,
+      "value_dec": "600",
+      "value": "02258"
+    },
+    {
+      "currency": 7,
+      "value_dec": "10000100",
+      "value": "059896e4"
+    }
+  ],
+  "state_hash": "d39bc14c91172de4838d48b425395da9c9c74764e9ed1bc7034bb12dbf874114",
+  "acc_type": 2,
+  "prev_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a"
+}"#
+    );
+}
+
+#[test]
+fn test_frozen_account_into_json_with_hash_0() {
+    let mut account = generate_test_account_by_init_code_hash(true);
+    let cloned_account = account.clone();
+    account.try_freeze().unwrap();
+    account.update_storage_stat().unwrap();
+    let boc = account.write_to_bytes().unwrap();
+    let data = account.write_to_new_cell().unwrap();
+    let data_cell = data.into_cell().unwrap();
+    let account2 = Account::construct_from_cell(data_cell).unwrap();
+    assert_eq!(account, account2);
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: cloned_account.get_code_hash(),
+        boc,
+        boc1: None,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account("id", &sender).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgEBDgEAwwAB+xuJgyFwAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyHIDHgDreaKxbwAAAAAAAAAAUXSHboALpzeCmSIuW8kHGpFoSnK7U5OOjsnT2jeOBpdiW38Ogik8KBZPIbdqU8/nNRAZe5nHNdTZe2UuaVDzF7y/6VWEioAECA87ACQICASAGAwIBIAUEAAcHMS3JAAUEBLECASAIBwAFBAPpAAUEAyECASANCgIBIAwLAAUEAlkAAwORAAVQskA=",
+  "init_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a",
+  "last_paid": 123456789,
+  "bits_dec": "798",
+  "bits": "231e",
+  "cells_dec": "14",
+  "cells": "0e",
+  "public_cells_dec": "0",
+  "public_cells": "00",
+  "due_payment_dec": "111",
+  "due_payment": "016f",
+  "last_trans_lt_dec": "0",
+  "last_trans_lt": "00",
+  "balance_dec": "100000000000",
+  "balance": "09174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value_dec": "100",
+      "value": "0164"
+    },
+    {
+      "currency": 2,
+      "value_dec": "200",
+      "value": "01c8"
+    },
+    {
+      "currency": 3,
+      "value_dec": "300",
+      "value": "0212c"
+    },
+    {
+      "currency": 4,
+      "value_dec": "400",
+      "value": "02190"
+    },
+    {
+      "currency": 5,
+      "value_dec": "500",
+      "value": "021f4"
+    },
+    {
+      "currency": 6,
+      "value_dec": "600",
+      "value": "02258"
+    },
+    {
+      "currency": 7,
+      "value_dec": "10000100",
+      "value": "059896e4"
+    }
+  ],
+  "state_hash": "d39bc14c91172de4838d48b425395da9c9c74764e9ed1bc7034bb12dbf874114",
+  "acc_type": 2,
+  "prev_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a"
+}"#
+    );
+}
+
+#[test]
+fn test_frozen_account_into_json_q() {
+    let mut account = generate_test_account_by_init_code_hash(false);
+    let cloned_account = account.clone();
+    account.try_freeze().unwrap();
+    account.update_storage_stat().unwrap();
+    let boc = account.write_to_bytes().unwrap();
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: cloned_account.get_code_hash(),
+        boc,
+        boc1: None,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account_ex("id", &sender, SerializationMode::QServer).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgEBDgEAogABudxMGQuAAACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+Q5AQ6AdbzRWLeAAAAAAAAAACi6Q7dABdObwUyRFy3kg41ItCU5XanJx0dk6e0bxwNLsS2/h0EUgECA87ACQICASAGAwIBIAUEAAcHMS3JAAUEBLECASAIBwAFBAPpAAUEAyECASANCgIBIAwLAAUEAlkAAwORAAVQskA=",
+  "last_paid": 123456789,
+  "bits": "0x21d",
+  "cells": "0xe",
+  "public_cells": "0x0",
+  "due_payment": "0x6f",
+  "last_trans_lt": "0x0",
+  "balance": "0x174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value": "0x64"
+    },
+    {
+      "currency": 2,
+      "value": "0xc8"
+    },
+    {
+      "currency": 3,
+      "value": "0x12c"
+    },
+    {
+      "currency": 4,
+      "value": "0x190"
+    },
+    {
+      "currency": 5,
+      "value": "0x1f4"
+    },
+    {
+      "currency": 6,
+      "value": "0x258"
+    },
+    {
+      "currency": 7,
+      "value": "0x9896e4"
+    }
+  ],
+  "state_hash": "d39bc14c91172de4838d48b425395da9c9c74764e9ed1bc7034bb12dbf874114",
+  "acc_type": 2,
+  "acc_type_name": "Frozen",
+  "prev_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a"
+}"#
+    );
+}
+
+#[test]
+fn test_pruned_account_into_json_0() {
+    let account = generate_test_account_by_init_code_hash(false);
+    let code = account.get_code().map(|cell| cell.repr_hash());
+    let libs = account.libraries().root().map(|cell| cell.repr_hash());
+
+    let cell = account.serialize().unwrap();
+
+    let proof = MerkleProof::create(&cell, |hash| {
+        Some(hash) != code.as_ref() && Some(hash) != libs.as_ref()
+    })
+    .unwrap();
+    let account = proof.virtualize().unwrap();
+    let boc = proof.write_to_bytes().unwrap();
+    let sender = AccountSerializationSet {
+        account,
+        prev_code_hash: None,
+        boc,
+        boc1: None,
+        proof: None,
+        dapp_id: Some(Default::default()),
+    };
+    let json = db_serialize_account("id", &sender).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "983217:0:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "workchain_id": 0,
+  "dapp_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "boc": "te6ccgECEgEAAQMACUYDHqSdbCQpXfDXQJv0UmyHqwKlpkLuM4yUD0ZtscULGIIABQEkfdxMGQuAAACBAYICgwOEBIUFhgaHB4gIiQmKCosLjAyNDY4Ojw+RZAe+AdbzRWLeAAAAAAAAAACi6Q7dAB73wAUEAwIoSAEBQ1njch2YkDA1IY/wfT3zDQzlnSJKvS17C/5lQj+w9n8AAQAPP/8f//////QoSAEBPCgWTyG3alPP5zUQGXuZxzXU2XtlLmlQ8xe8v+lVhIoABAIDzsANBgIBIAoHAgEgCQgABwcxLckABQQEsQIBIAwLAAUEA+kABQQDIQIBIBEOAgEgEA8ABQQCWQADA5EABVCyQA==",
+  "last_paid": 123456789,
+  "bits_dec": "991",
+  "bits": "23df",
+  "cells_dec": "22",
+  "cells": "116",
+  "public_cells_dec": "0",
+  "public_cells": "00",
+  "due_payment_dec": "111",
+  "due_payment": "016f",
+  "last_trans_lt_dec": "0",
+  "last_trans_lt": "00",
+  "balance_dec": "100000000000",
+  "balance": "09174876e800",
+  "balance_other": [
+    {
+      "currency": 1,
+      "value_dec": "100",
+      "value": "0164"
+    },
+    {
+      "currency": 2,
+      "value_dec": "200",
+      "value": "01c8"
+    },
+    {
+      "currency": 3,
+      "value_dec": "300",
+      "value": "0212c"
+    },
+    {
+      "currency": 4,
+      "value_dec": "400",
+      "value": "02190"
+    },
+    {
+      "currency": 5,
+      "value_dec": "500",
+      "value": "021f4"
+    },
+    {
+      "currency": 6,
+      "value_dec": "600",
+      "value": "02258"
+    },
+    {
+      "currency": 7,
+      "value_dec": "10000100",
+      "value": "059896e4"
+    }
+  ],
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a",
+  "data": "te6ccgEBAQEACgAADz//H//////0",
+  "data_hash": "47cc6bba530c25a982969baf59254598715aecb5b9d14531d96d24d8a623dd93",
+  "library_hash": "4359e3721d98903035218ff07d3df30d0ce59d224abd2d7b0bfe65423fb0f67f",
+  "acc_type": 1
+}"#
+    );
+}
+
+#[test]
+fn test_message_into_json_0() {
+    let mut msg = Message::with_ext_in_header(ExternalInboundMessageHeader {
+        src: MsgAddressExt::with_extern(SliceData::new(vec![1, 2, 3, 4, 5, 0x80])).unwrap(),
+        dst: MsgAddressInt::default(),
+        import_fee: 15u64.into(),
+    });
+
+    let mut stinit = StateInit::default();
+    stinit.set_split_depth(Number5::new(23).unwrap());
+    stinit.set_special(TickTock::with_values(false, true));
+    let code = SliceData::new(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF4]);
+    stinit.set_code(code.into_cell());
+    let library = SliceData::new(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF4]);
+    stinit.set_library_code(library.into_cell(), false).unwrap();
+
+    msg.set_state_init(stinit);
+    msg.set_body(SliceData::new(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF4]));
+
+    let cell = msg.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = msg.hash().unwrap();
+    let msg = MessageSerializationSet {
+        message: msg,
+        id,
+        block_id: None,
+        transaction_id: None,
+        transaction_now: Some(123),
+        status: MessageProcessingStatus::Processing,
+        boc,
+        proof: None,
+    };
+    let json = db_serialize_message("id", &msg).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "59bf855c9fbee1152e1e151368f5af5850f22f606c819c43adb2fb319e07a4c8",
+  "boc": "te6ccgEBAwEAZgACZpFACBAYICwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ+3tH/////////gIBAUOgD0Fyr0K9J5lHnS2ZaV2eTrRuMUTHkV2UVWKfzcPMQuWIAgAPP/////////Q=",
+  "status": 2,
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBAQEACgAADz/////////0",
+  "code_hash": "7a0b957a15e93cca3ce96ccb4aecf275a3718a263c8aeca2ab14fe6e1e62172c",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5YgBAA8/////////9A==",
+  "library_hash": "c39760fbba54774b6c7fa76bfd46d6fb89d1fe0b19570bef3c4d08decc8b4566",
+  "body": "te6ccgEBAQEACgAADz/////////0",
+  "body_hash": "7a0b957a15e93cca3ce96ccb4aecf275a3718a263c8aeca2ab14fe6e1e62172c",
+  "msg_type": 1,
+  "src": ":0102030405",
+  "dst": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "dst_workchain_id": 0,
+  "import_fee_dec": "15",
+  "import_fee": "00f",
+  "created_at": 123
+}"#
+    );
+}
+
+#[test]
+fn test_message_into_json_q() {
+    let mut msg = Message::with_ext_in_header(ExternalInboundMessageHeader {
+        src: MsgAddressExt::with_extern(SliceData::new(vec![1, 2, 3, 4, 5, 0x80])).unwrap(),
+        dst: MsgAddressInt::default(),
+        import_fee: 15u64.into(),
+    });
+
+    let mut stinit = StateInit::default();
+    stinit.set_split_depth(Number5::new(23).unwrap());
+    stinit.set_special(TickTock::with_values(false, true));
+    let code = SliceData::new(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF4]);
+    stinit.set_code(code.into_cell());
+    let library = SliceData::new(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF4]);
+    stinit.set_library_code(library.into_cell(), false).unwrap();
+
+    msg.set_state_init(stinit);
+    msg.set_body(SliceData::new(vec![0x3F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF4]));
+
+    let cell = msg.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = msg.hash().unwrap();
+    let msg = MessageSerializationSet {
+        message: msg,
+        id,
+        block_id: None,
+        transaction_id: None,
+        transaction_now: Some(123),
+        status: MessageProcessingStatus::Processing,
+        boc,
+        proof: None,
+    };
+    let json = db_serialize_message_ex("id", &msg, SerializationMode::QServer).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_eq!(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "59bf855c9fbee1152e1e151368f5af5850f22f606c819c43adb2fb319e07a4c8",
+  "boc": "te6ccgEBAwEAZgACZpFACBAYICwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ+3tH/////////gIBAUOgD0Fyr0K9J5lHnS2ZaV2eTrRuMUTHkV2UVWKfzcPMQuWIAgAPP/////////Q=",
+  "status": 2,
+  "status_name": "processing",
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBAQEACgAADz/////////0",
+  "code_hash": "7a0b957a15e93cca3ce96ccb4aecf275a3718a263c8aeca2ab14fe6e1e62172c",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5YgBAA8/////////9A==",
+  "library_hash": "c39760fbba54774b6c7fa76bfd46d6fb89d1fe0b19570bef3c4d08decc8b4566",
+  "body": "te6ccgEBAQEACgAADz/////////0",
+  "body_hash": "7a0b957a15e93cca3ce96ccb4aecf275a3718a263c8aeca2ab14fe6e1e62172c",
+  "msg_type": 1,
+  "msg_type_name": "extIn",
+  "src": ":0102030405",
+  "dst": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "dst_workchain_id": 0,
+  "import_fee": "0xf",
+  "created_at": 123
+}"#
+    );
+}
+
+#[test]
+fn test_transaction_wo_out_msgs_into_json() {
+    let mut transaction = generate_tranzaction(AccountId::from([55; 32]));
+    transaction.out_msgs = OutMessages::default();
+    let cell = transaction.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = transaction.hash().unwrap();
+    let tr = TransactionSerializationSetEx {
+        transaction: &transaction,
+        id: &id,
+        status: TransactionProcessingStatus::Preliminary,
+        block_id: None,
+        workchain_id: None,
+        boc: &boc,
+        proof: None,
+    };
+
+    let json = db_serialize_transaction("id", tr).unwrap();
+    let expected_id = format!("{:x}", id);
+    let expected_boc = tvm_types::base64_encode(&boc);
+    let expected_in_msg = transaction_in_msg_hash(&transaction);
+    let expected_out_msgs = transaction_out_msg_hashes(&transaction);
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_json_eq_with_fields(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "6108183524fa840491e6a417019d5a1414b3c06d57e7e9e66e412cb2e836180c",
+  "boc": "te6ccgECDgEAAuIAA7Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3AAAAAAAB4h8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHJAUagDAgEAAwACAIJyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEBoAQEYwIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAW9+CgkIBQHe////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////BgHe/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+BwDepqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqamAUOgD0Fyr0K9J5lHnS2ZaV2eTrRuMUTHkV2UVWKfzcPMQuWYCQAPP/////////QBDz/////////0CwFFrcm6/FaUEVZY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1EMAUWtybr8VpQRVlj6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbUQ0ARa3JuvxWlBFXWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tR",
+  "status": 1,
+  "compute": {
+    "skipped_reason": 0,
+    "compute_type": 0
+  },
+  "credit_first": false,
+  "aborted": false,
+  "destroyed": false,
+  "tr_type": 0,
+  "lt_dec": "123423",
+  "lt": "41e21f",
+  "prev_trans_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prev_trans_lt_dec": "0",
+  "prev_trans_lt": "00",
+  "now": 0,
+  "outmsg_cnt": 3,
+  "orig_status": 1,
+  "end_status": 2,
+  "in_msg": "8e3bd14d280b687aff7ee4996327bcc724e3f5917078eede16231a34650ed02d",
+  "out_msgs": [],
+  "account_addr": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "workchain_id": 0,
+  "total_fees_dec": "653",
+  "total_fees": "0228d",
+  "balance_delta_dec": "-653",
+  "balance_delta": "-fdd72",
+  "old_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "new_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}"#,
+        &[
+            ("id", serde_json::json!(expected_id)),
+            ("boc", serde_json::json!(expected_boc)),
+            ("in_msg", serde_json::json!(expected_in_msg)),
+            ("out_msgs", serde_json::json!(expected_out_msgs)),
+        ],
+    );
+}
+
+#[test]
+fn test_transaction_into_json_0() {
+    let transaction = generate_tranzaction(AccountId::from([55; 32]));
+
+    let message = transaction.get_out_msg(0).unwrap().unwrap();
+    let cell = message.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = message.hash().unwrap();
+    let expected_message_id = format!("{:x}", id);
+    let expected_transaction_id = format!("{:x}", transaction.hash().unwrap());
+    let expected_boc = tvm_types::base64_encode(&boc);
+    let msg = MessageSerializationSet {
+        message,
+        id,
+        block_id: None,
+        transaction_id: transaction.hash().ok(),
+        transaction_now: Some(transaction.now()),
+        status: MessageProcessingStatus::Processing,
+        boc,
+        proof: None,
+    };
+    let json = db_serialize_message("id", &msg).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_json_eq_with_fields(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "8e3bd14d280b687aff7ee4996327bcc724e3f5917078eede16231a34650ed02d",
+  "transaction_id": "4fab8933ec80336e4aa4be3b46c52149c6053f6c39267a43eaf3970b11422833",
+  "boc": "te6ccgECCgEAAjgABGMCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFvfgYFBAEB3v///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////wIB3v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/gMA3qampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampgFDoA9Bcq9CvSeZR50tmWldnk60bjFEx5FdlFVin83DzELlmAUADz/////////0AQ8/////////9AcBRa3JuvxWlBFWWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tRCAFFrcm6/FaUEVZY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1EJAEWtybr8VpQRV1j6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbUQ==",
+  "status": 2,
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBBAEAfAABDz/////////0AQFFrcm6/FaUEVZY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1ECAUWtybr8VpQRVlj6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbUQMARa3JuvxWlBFXWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tR",
+  "code_hash": "360f4a95e55ffb03c422b80f244e624bce83701769594d1f28fee6675365c649",
+  "data": "te6ccgEBAQEACgAADz/////////0",
+  "data_hash": "7a0b957a15e93cca3ce96ccb4aecf275a3718a263c8aeca2ab14fe6e1e62172c",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgBAA8/////////9A==",
+  "library_hash": "4359e3721d98903035218ff07d3df30d0ce59d224abd2d7b0bfe65423fb0f67f",
+  "body": "te6ccgECAwEAAVUAAd7///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8BAd7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v4CAN6mpqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqY=",
+  "body_hash": "7cedc673b096999b859bad6d552c4574bec3c5aafca70fe586794cc6aff7326b",
+  "msg_type": 0,
+  "src": "",
+  "dst": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "dst_workchain_id": 0,
+  "ihr_disabled": false,
+  "ihr_fee_dec": "0",
+  "ihr_fee": "000",
+  "fwd_fee_dec": "0",
+  "fwd_fee": "000",
+  "bounce": false,
+  "bounced": false,
+  "value_dec": "0",
+  "value": "000",
+  "created_lt_dec": "0",
+  "created_lt": "00",
+  "created_at": 0
+}"#,
+        &[
+            ("id", serde_json::json!(expected_message_id)),
+            ("transaction_id", serde_json::json!(expected_transaction_id)),
+            ("boc", serde_json::json!(expected_boc)),
+        ],
+    );
+
+    let cell = transaction.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = transaction.hash().unwrap();
+    let expected_transaction_id = format!("{:x}", id);
+    let expected_boc = tvm_types::base64_encode(&boc);
+    let tr = TransactionSerializationSet {
+        transaction,
+        id,
+        status: TransactionProcessingStatus::Preliminary,
+        block_id: None,
+        workchain_id: -1,
+        boc,
+        proof: None,
+    };
+
+    let json = db_serialize_transaction("id", &tr).unwrap();
+    let expected_in_msg = transaction_in_msg_hash(&tr.transaction);
+    let expected_out_msgs = transaction_out_msg_hashes(&tr.transaction);
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_json_eq_with_fields(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "4fab8933ec80336e4aa4be3b46c52149c6053f6c39267a43eaf3970b11422833",
+  "boc": "te6ccgECFAEAAywAA7Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3AAAAAAAB4h8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHJAUagDAgEAAwACAIJyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIB4AoEAgHbBgUBAUgIAgEgCQcBASAIAGECAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAQEgCgRjAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABb34QDw4LAd7///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8MAd7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v4NAN6mpqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqYBQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgPAA8/////////9AEPP/////////QRAUWtybr8VpQRVlj6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbURIBRa3JuvxWlBFWWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tREwBFrcm6/FaUEVdY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1E=",
+  "status": 1,
+  "compute": {
+    "skipped_reason": 0,
+    "compute_type": 0
+  },
+  "credit_first": false,
+  "aborted": false,
+  "destroyed": false,
+  "tr_type": 0,
+  "lt_dec": "123423",
+  "lt": "41e21f",
+  "prev_trans_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prev_trans_lt_dec": "0",
+  "prev_trans_lt": "00",
+  "now": 0,
+  "outmsg_cnt": 3,
+  "orig_status": 1,
+  "end_status": 2,
+  "in_msg": "8e3bd14d280b687aff7ee4996327bcc724e3f5917078eede16231a34650ed02d",
+  "out_msgs": [
+    "8e3bd14d280b687aff7ee4996327bcc724e3f5917078eede16231a34650ed02d",
+    "9ab09a32ad06703a03d9fa2b7fe3e8e27fad9118eee1dae6d10715c1b7d13244",
+    "9ab09a32ad06703a03d9fa2b7fe3e8e27fad9118eee1dae6d10715c1b7d13244"
+  ],
+  "account_addr": "-1:3737373737373737373737373737373737373737373737373737373737373737",
+  "workchain_id": -1,
+  "total_fees_dec": "653",
+  "total_fees": "0228d",
+  "balance_delta_dec": "-653",
+  "balance_delta": "-fdd72",
+  "old_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "new_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}"#,
+        &[
+            ("id", serde_json::json!(expected_transaction_id)),
+            ("boc", serde_json::json!(expected_boc)),
+            ("in_msg", serde_json::json!(expected_in_msg)),
+            ("out_msgs", serde_json::json!(expected_out_msgs)),
+        ],
+    );
+}
+
+#[test]
+fn test_transaction_into_json_q() {
+    let transaction = generate_tranzaction(AccountId::from([55; 32]));
+
+    let mut message = transaction.get_out_msg(0).unwrap().unwrap();
+    if let CommonMsgInfo::IntMsgInfo(header) = message.header_mut() {
+        header.set_src(MsgAddressInt::default());
+    }
+    let cell = message.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = message.hash().unwrap();
+    let expected_message_id = format!("{:x}", id);
+    let expected_transaction_id = format!("{:x}", transaction.hash().unwrap());
+    let expected_boc = tvm_types::base64_encode(&boc);
+    let msg = MessageSerializationSet {
+        message,
+        id,
+        block_id: None,
+        transaction_id: transaction.hash().ok(),
+        transaction_now: Some(transaction.now()),
+        status: MessageProcessingStatus::Processing,
+        boc,
+        proof: None,
+    };
+    let json = db_serialize_message_ex("id", &msg, SerializationMode::QServer).unwrap();
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_json_eq_with_fields(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "f7350d29cbe730a6e2ad97acccd8bd4cfe74ce517aa993dc2594147ee2dfa0ad",
+  "transaction_id": "4fab8933ec80336e4aa4be3b46c52149c6053f6c39267a43eaf3970b11422833",
+  "boc": "te6ccgECCgEAAlkABKUIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC3vwYFBAEB3v///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////wIB3v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/gMA3qampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampgFDoA9Bcq9CvSeZR50tmWldnk60bjFEx5FdlFVin83DzELlmAUADz/////////0AQ8/////////9AcBRa3JuvxWlBFWWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tRCAFFrcm6/FaUEVZY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1EJAEWtybr8VpQRV1j6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbUQ==",
+  "status": 2,
+  "status_name": "processing",
+  "split_depth": 23,
+  "tick": false,
+  "tock": true,
+  "code": "te6ccgEBBAEAfAABDz/////////0AQFFrcm6/FaUEVZY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1ECAUWtybr8VpQRVlj6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbUQMARa3JuvxWlBFXWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tR",
+  "code_hash": "360f4a95e55ffb03c422b80f244e624bce83701769594d1f28fee6675365c649",
+  "data": "te6ccgEBAQEACgAADz/////////0",
+  "data_hash": "7a0b957a15e93cca3ce96ccb4aecf275a3718a263c8aeca2ab14fe6e1e62172c",
+  "library": "te6ccgEBAgEALwABQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgBAA8/////////9A==",
+  "library_hash": "4359e3721d98903035218ff07d3df30d0ce59d224abd2d7b0bfe65423fb0f67f",
+  "body": "te6ccgECAwEAAVUAAd7///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8BAd7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v4CAN6mpqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqY=",
+  "body_hash": "7cedc673b096999b859bad6d552c4574bec3c5aafca70fe586794cc6aff7326b",
+  "msg_type": 0,
+  "msg_type_name": "internal",
+  "src": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "src_workchain_id": 0,
+  "dst": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "dst_workchain_id": 0,
+  "ihr_disabled": false,
+  "ihr_fee": "0x0",
+  "fwd_fee": "0x0",
+  "bounce": false,
+  "bounced": false,
+  "value": "0x0",
+  "created_lt": "0x0",
+  "created_at": 0
+}"#,
+        &[
+            ("id", serde_json::json!(expected_message_id)),
+            ("transaction_id", serde_json::json!(expected_transaction_id)),
+            ("boc", serde_json::json!(expected_boc)),
+        ],
+    );
+
+    let cell = transaction.serialize().unwrap();
+    let boc = write_boc(&cell).unwrap();
+    let id = transaction.hash().unwrap();
+    let expected_transaction_id = format!("{:x}", id);
+    let expected_boc = tvm_types::base64_encode(&boc);
+    let tr = TransactionSerializationSet {
+        transaction,
+        id,
+        status: TransactionProcessingStatus::Preliminary,
+        block_id: None,
+        boc,
+        proof: None,
+        workchain_id: -1,
+    };
+
+    let json = db_serialize_transaction_ex("id", &tr, SerializationMode::QServer).unwrap();
+    let expected_in_msg = transaction_in_msg_hash(&tr.transaction);
+    let expected_out_msgs = transaction_out_msg_hashes(&tr.transaction);
+    println!("\n\n{:#}", serde_json::json!(json));
+    assert_json_eq_with_fields(
+        format!("{:#}", serde_json::json!(json)),
+        r#"{
+  "json_version": 8,
+  "id": "4fab8933ec80336e4aa4be3b46c52149c6053f6c39267a43eaf3970b11422833",
+  "boc": "te6ccgECFAEAAywAA7Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3AAAAAAAB4h8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHJAUagDAgEAAwACAIJyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIB4AoEAgHbBgUBAUgIAgEgCQcBASAIAGECAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAQEgCgRjAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABb34QDw4LAd7///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8MAd7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v4NAN6mpqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqampqYBQ6APQXKvQr0nmUedLZlpXZ5OtG4xRMeRXZRVYp/Nw8xC5ZgPAA8/////////9AEPP/////////QRAUWtybr8VpQRVlj6K9/kZRUaMgNpSv/NAI82i9LMjMgQ+2tbURIBRa3JuvxWlBFWWPor3+RlFRoyA2lK/80AjzaL0syMyBD7a1tREwBFrcm6/FaUEVdY+ivf5GUVGjIDaUr/zQCPNovSzIzIEPtrW1E=",
+  "status": 1,
+  "status_name": "preliminary",
+  "compute": {
+    "skipped_reason": 0,
+    "skipped_reason_name": "noState",
+    "compute_type": 0,
+    "compute_type_name": "skipped"
+  },
+  "credit_first": false,
+  "aborted": false,
+  "destroyed": false,
+  "tr_type": 0,
+  "tr_type_name": "ordinary",
+  "lt": "0x1e21f",
+  "prev_trans_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prev_trans_lt": "0x0",
+  "now": 0,
+  "outmsg_cnt": 3,
+  "orig_status": 1,
+  "orig_status_name": "Active",
+  "end_status": 2,
+  "end_status_name": "Frozen",
+  "in_msg": "8e3bd14d280b687aff7ee4996327bcc724e3f5917078eede16231a34650ed02d",
+  "out_msgs": [
+    "8e3bd14d280b687aff7ee4996327bcc724e3f5917078eede16231a34650ed02d",
+    "9ab09a32ad06703a03d9fa2b7fe3e8e27fad9118eee1dae6d10715c1b7d13244",
+    "9ab09a32ad06703a03d9fa2b7fe3e8e27fad9118eee1dae6d10715c1b7d13244"
+  ],
+  "account_addr": "-1:3737373737373737373737373737373737373737373737373737373737373737",
+  "workchain_id": -1,
+  "total_fees": "0x28d",
+  "balance_delta": "-0x28d",
+  "old_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "new_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}"#,
+        &[
+            ("id", serde_json::json!(expected_transaction_id)),
+            ("boc", serde_json::json!(expected_boc)),
+            ("in_msg", serde_json::json!(expected_in_msg)),
+            ("out_msgs", serde_json::json!(expected_out_msgs)),
+        ],
+    );
+}
+
+fn test_json_block(blockhash: &str, mode: SerializationMode) {
+    let filename = format!("{}.boc", blockhash);
+    let in_path = Path::new("src/tests/data").join(filename);
+    let boc = read(in_path.clone()).unwrap_or_else(|_| panic!("Error reading file {:?}", in_path));
+    let cell = read_single_root_boc(&boc).expect("Error deserializing single root BOC");
+
+    let block = Block::construct_from_cell(cell).unwrap();
+    let id = block.hash().unwrap();
+    let block = BlockSerializationSet { block, id, status: BlockProcessingStatus::Proposed, boc };
+
+    let json =
+        format!("{:#}", serde_json::json!(db_serialize_block_ex("id", &block, mode).unwrap()));
+    let filename =
+        format!("{}{}", blockhash, if let SerializationMode::QServer = mode { "-Q" } else { "" });
+    assert_json_eq_file(&json, &filename);
+}
+
+#[test]
+fn test_get_config() {
+    let filename =
+        "src/tests/data/9C9906A80D020952E0192DC60C0B2BF1F55FE9A9E065606E8FE25C08BD1AA6B2.boc";
+    let in_path = Path::new(filename);
+    let boc = read(in_path).unwrap_or_else(|_| panic!("Error reading file {:?}", filename));
+    let cell = read_single_root_boc(boc).expect("Error deserializing single root BOC");
+
+    let block = Block::construct_from_cell(cell).unwrap();
+
+    let extra = block.read_extra().unwrap();
+    let master = extra.read_custom().unwrap().unwrap();
+    let config = master.config().unwrap();
+    let json = serialize_config_param(config, 12).unwrap();
+    let etalon = r#"{
+  "p12": [
+    {
+      "workchain_id": 0,
+      "enabled_since": 1573821854,
+      "actual_min_split": 0,
+      "min_split": 2,
+      "max_split": 32,
+      "active": true,
+      "accept_msgs": true,
+      "flags": 0,
+      "zerostate_root_hash": "55b13f6d0e1d0c34c9c2160f6f918e92d82bf9ddcf8de2e4c94a3fdf39d15446",
+      "zerostate_file_hash": "ee0bedfe4b32761fb35e9e1d8818ea720cad1a0e7b4d2ed673c488e72e910342",
+      "version": 0,
+      "basic": true,
+      "vm_version": -1,
+      "vm_mode": 0
+    }
+  ]
+}"#;
+
+    assert_eq!(etalon, json);
+    // if json != etalon {
+    // std::fs::write("real_tvm_data/p12-config-param.json", &json).unwrap();
+    // panic!("json != etalon")
+    // }
+}
+
+#[ignore]
+#[test]
+fn test_block_into_json_1() {
+    test_json_block(
+        "89ED400A43E76664437EFC9C79B84AC387493A9EE5E789338FF71C25F54218BE",
+        SerializationMode::Standart,
+    )
+}
+
+#[test]
+fn test_block_into_json_2() {
+    test_json_block(
+        "18AFCDD25BE0989CE516504263EB351818A0FF8F6AB3689501C8E3B767EF413C",
+        SerializationMode::Standart,
+    )
+}
+
+#[ignore]
+#[test]
+fn test_block_into_json_3() {
+    test_json_block(
+        "046784ea72574ace66375629229700afa4c7e032a360fc94df4c20231fddea45",
+        SerializationMode::Standart,
+    )
+}
+
+#[ignore]
+#[test]
+fn test_block_into_json_q() {
+    test_json_block(
+        "89ED400A43E76664437EFC9C79B84AC387493A9EE5E789338FF71C25F54218BE",
+        SerializationMode::QServer,
+    )
+}
+
+#[ignore]
+#[test]
+fn test_block_with_copyleft_into_json() {
+    test_json_block(
+        "ea67954c1c58997c66b5d91b4a3369cfa795b96662c7f7ea7daad677266fb7a3",
+        SerializationMode::Standart,
+    )
+}
+
+#[ignore]
+#[test]
+fn test_masterblock_with_copyleft_into_json() {
+    test_json_block(
+        "f7fdf140aa14f8dd8426e6c6aa339ae65e3bf492ce26dd7ce08916066d6d64c6",
+        SerializationMode::Standart,
+    )
+}
+
+fn _get_validator_set() -> ValidatorSet {
+    let keydat = base64_decode("7w3fX5jiuo8PyQoFaEL+K9pE/XvbKjH63i0JcraLlBM=").unwrap();
+
+    let key = SigPubKey::from_bytes(&keydat).unwrap();
+    let vd1 = ValidatorDescr::with_params(key, 1, None, None);
+
+    let key = SigPubKey::from_bytes(&keydat).unwrap();
+    let vd2 = ValidatorDescr::with_params(key, 2, None, None);
+
+    ValidatorSet::new(1234567, 39237233, 1, vec![vd1, vd2]).unwrap()
+}
+
+fn _get_config_param11() -> ConfigParam11 {
+    let normal_params = ConfigProposalSetup {
+        min_tot_rounds: 1,
+        max_tot_rounds: 2,
+        min_wins: 3,
+        max_losses: 4,
+        min_store_sec: 5,
+        max_store_sec: 6,
+        bit_price: 7,
+        cell_price: 8,
+    };
+    let critical_params = ConfigProposalSetup {
+        min_tot_rounds: 10,
+        max_tot_rounds: 20,
+        min_wins: 30,
+        max_losses: 40,
+        min_store_sec: 50000,
+        max_store_sec: 60000,
+        bit_price: 70000,
+        cell_price: 80000,
+    };
+    ConfigVotingSetup::new(&normal_params, &critical_params).unwrap()
+}
+
+#[test]
+fn test_db_serialize_block_signatures() {
+    let doc = serde_json::to_string_pretty(&serde_json::json!(
+        db_serialize_block_signatures(
+            "_id",
+            &UInt256::from([1; 32]),
+            &[
+                CryptoSignaturePair::with_params(
+                    UInt256::from([2; 32]),
+                    CryptoSignature::from_r_s(&[3; 32], &[4; 32]).unwrap()
+                ),
+                CryptoSignaturePair::with_params(
+                    UInt256::from([5; 32]),
+                    CryptoSignature::from_r_s(&[6; 32], &[7; 32]).unwrap()
+                )
+            ]
+        )
+        .unwrap()
+    ))
+    .unwrap();
+
+    println!("{}", doc);
+
+    assert_eq!(
+        doc,
+        r#"{
+  "json_version": 8,
+  "_id": "0101010101010101010101010101010101010101010101010101010101010101",
+  "signatures": [
+    {
+      "node_id": "0202020202020202020202020202020202020202020202020202020202020202",
+      "r": "0303030303030303030303030303030303030303030303030303030303030303",
+      "s": "0404040404040404040404040404040404040404040404040404040404040404"
+    },
+    {
+      "node_id": "0505050505050505050505050505050505050505050505050505050505050505",
+      "r": "0606060606060606060606060606060606060606060606060606060606060606",
+      "s": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  ]
+}"#
+    )
+}
+
+#[test]
+fn test_serialize_shard_descr() {
+    let sd = ShardDescr::default();
+    let doc = serialize_shard_descr(&sd, SerializationMode::Standart).unwrap();
+    print!("{}", serde_json::to_string_pretty(&doc).unwrap());
+    assert_eq!(
+        doc,
+        serde_json::from_str::<serde_json::Value>(
+            r#"
+    {
+      "seq_no": 0,
+      "reg_mc_seqno": 0,
+      "start_lt_dec": "0",
+      "start_lt": "00",
+      "end_lt_dec": "0",
+      "end_lt": "00",
+      "root_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "file_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "before_split": false,
+      "before_merge": false,
+      "want_split": false,
+      "want_merge": false,
+      "nx_cc_updated": false,
+      "gen_utime": 0,
+      "next_catchain_seqno": 0,
+      "next_validator_shard": "0000000000000000",
+      "min_ref_mc_seqno": 0,
+      "fees_collected_dec": "0",
+      "fees_collected": "000",
+      "funds_created_dec": "0",
+      "funds_created": "000",
+      "flags": 0,
+      "copyleft_rewards": []
+    }
+    "#
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn test_db_serialize_block_proof() {
+    let boc = read("src/tests/data/block_proof").expect("Error reading proof file");
+    let cell = read_single_root_boc(boc).expect("Error deserializing single root BOC");
+
+    let proof = BlockProof::construct_from_cell(cell).unwrap();
+
+    let json = serde_json::to_string_pretty(&serde_json::json!(
+        db_serialize_block_proof("_id", &proof).unwrap()
+    ))
+    .unwrap();
+
+    assert_json_eq_file(&json, "proof");
+}
+
+fn prepare_shard_state_json(name: &str, workchain_id: i32, mode: SerializationMode) -> String {
+    let boc = read(format!("src/tests/data/states/{}", name))
+        .unwrap_or_else(|_| panic!("Error reading file {:?}", name));
+    let cell = read_single_root_boc(&boc).expect("Error deserializing single root BOC");
+    let id = format!("state:{:x}", cell.repr_hash());
+
+    let state = ShardStateUnsplit::construct_from_cell(cell).unwrap();
+
+    let set = ShardStateSerializationSet { state, boc, id, block_id: None, workchain_id };
+
+    format!("{:#}", serde_json::json!(db_serialize_shard_state_ex("id", &set, mode).unwrap()))
+}
+
+fn check_shard_state(name: &str, workchain_id: i32, mode: SerializationMode) {
+    let json = prepare_shard_state_json(name, workchain_id, mode);
+
+    let postfix = match mode {
+        SerializationMode::QServer => "-Q",
+        SerializationMode::Standart => "",
+        _ => panic!(),
+    };
+    // std::fs::write(file_name.clone() + postfix + "-ethalon.json",
+    // &json).unwrap();
+    let name = format!("states/{}{}", name, postfix);
+    assert_json_eq_file(&json, &name);
+}
+
+#[ignore]
+#[test]
+fn test_serialize_mc_zerostate_s() {
+    check_shard_state(
+        "main_ton_dev_zerostate_-1_D270B87B2952B5BA7DAA70AAF0A8C361BEFCF4D8D2DB92F9640D5443070838E4",
+        -1,
+        SerializationMode::Standart,
+    );
+}
+
+#[ignore]
+#[test]
+fn test_serialize_mc_zerostate_q() {
+    check_shard_state(
+        "main_ton_dev_zerostate_-1_D270B87B2952B5BA7DAA70AAF0A8C361BEFCF4D8D2DB92F9640D5443070838E4",
+        -1,
+        SerializationMode::QServer,
+    );
+}
+
+#[test]
+fn test_serialize_wc_zerostate_s() {
+    check_shard_state(
+        "main_ton_dev_zerostate_0_97AF4602A57FC884F68BB4659BAB8875DC1F5E45A9FD4FBAFD0C9BC10AA5067C",
+        0,
+        SerializationMode::Standart,
+    );
+}
+
+#[test]
+fn test_serialize_wc_zerostate_q() {
+    check_shard_state(
+        "main_ton_dev_zerostate_0_97AF4602A57FC884F68BB4659BAB8875DC1F5E45A9FD4FBAFD0C9BC10AA5067C",
+        0,
+        SerializationMode::QServer,
+    );
+}
+
+#[ignore]
+#[test]
+fn test_serialize_wc_state_s() {
+    check_shard_state(
+        "state_4723_0_c800000000000000_81832210A895E93967B7D2A0638159FC5FD88C1DB402545AAAABA509BE93017F",
+        0,
+        SerializationMode::Standart,
+    );
+}
+
+#[ignore]
+#[test]
+fn test_serialize_wc_state_q() {
+    check_shard_state(
+        "state_4723_0_c800000000000000_81832210A895E93967B7D2A0638159FC5FD88C1DB402545AAAABA509BE93017F",
+        0,
+        SerializationMode::QServer,
+    );
+}
+
+fn check_transaction_field(
+    file: &str,
+    field_name: &str,
+    std_value: impl Into<Value>,
+    q_value: impl Into<Value>,
+) {
+    let boc = std::fs::read(Path::new("src/tests/data/transactions").join(file)).unwrap();
+    let cell = read_single_root_boc(&boc).expect("Error deserializing single root BOC");
+    let id = cell.repr_hash();
+    let tr = Transaction::construct_from_cell(cell).unwrap();
+    let set = TransactionSerializationSet {
+        block_id: None,
+        boc,
+        id,
+        proof: None,
+        status: TransactionProcessingStatus::Finalized,
+        workchain_id: 0,
+        transaction: tr,
+    };
+    let serialized = db_serialize_transaction_ex("id", &set, SerializationMode::Standart).unwrap();
+    assert_eq!(serde_json::json!(serialized)[field_name], std_value.into());
+    let serialized = db_serialize_transaction_ex("id", &set, SerializationMode::QServer).unwrap();
+    assert_eq!(serde_json::json!(serialized)[field_name], q_value.into());
+}
+
+#[ignore = "CellUnderflow while deserializing, need to fix"]
+#[test]
+fn test_balance_delta() {
+    check_transaction_field("aborted_bounced.boc", "balance_delta", "000", "0x0");
+    check_transaction_field("ext_in&int_out.boc", "balance_delta", "-f8e11fafa9", "-0x1ee05056");
+    check_transaction_field(
+        "ext_in&int_out_special.boc",
+        "balance_delta",
+        "-f2d92301e7d945ff",
+        "-0x26dcfe1826ba00",
+    );
+    check_transaction_field("int_in.boc", "balance_delta", "0c71b149203e800", "0x71b149203e800");
+}
+
+#[ignore = "CellUnderflow while deserializing, need to fix"]
+#[test]
+fn test_ext_in_msg_fee() {
+    check_transaction_field("aborted_bounced.boc", "ext_in_msg_fee", Value::Null, Value::Null);
+    check_transaction_field("ext_in&int_out.boc", "ext_in_msg_fee", "051c80e0", "0x1c80e0");
+    check_transaction_field("ext_in&int_out_special.boc", "ext_in_msg_fee", "000", "0x0");
+    check_transaction_field("int_in.boc", "ext_in_msg_fee", Value::Null, Value::Null);
+}
+
+#[test]
+fn test_serialize_deleted_account_s() {
+    let account = generate_test_account_by_init_code_hash(true);
+    let set = DeletedAccountSerializationSet {
+        account_id: MsgAddressInt::default().get_address(),
+        workchain_id: MsgAddressInt::default().get_workchain_id(),
+        prev_code_hash: account.get_code_hash(),
+    };
+    let doc = db_serialize_deleted_account("id", &set).unwrap();
+
+    assert_eq!(
+        format!("{:#}", serde_json::json!(doc)),
+        r#"{
+  "json_version": 8,
+  "id": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "workchain_id": 0,
+  "acc_type": 3,
+  "prev_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a"
+}"#
+    )
+}
+
+#[test]
+fn test_serialize_deleted_account_q() {
+    let account = generate_test_account_by_init_code_hash(true);
+    let set = DeletedAccountSerializationSet {
+        account_id: MsgAddressInt::default().get_address(),
+        workchain_id: MsgAddressInt::default().get_workchain_id(),
+        prev_code_hash: account.get_code_hash(),
+    };
+    let doc = db_serialize_deleted_account_ex("id", &set, SerializationMode::QServer).unwrap();
+
+    assert_eq!(
+        format!("{:#}", serde_json::json!(doc)),
+        r#"{
+  "json_version": 8,
+  "id": "0:0000000000000000000000000000000000000000000000000000000000000000",
+  "workchain_id": 0,
+  "acc_type": 3,
+  "acc_type_name": "NonExist",
+  "prev_code_hash": "3c28164f21b76a53cfe73510197b99c735d4d97b652e6950f317bcbfe955848a"
+}"#
+    )
+}
+
+#[test]
+fn test_block_order() {
+    let block = std::fs::read(
+        "src/tests/data/89ED400A43E76664437EFC9C79B84AC387493A9EE5E789338FF71C25F54218BE.boc",
+    )
+    .unwrap();
+    let block = Block::construct_from_bytes(&block).unwrap();
+    assert_eq!("4c6dd7m", block_order(&block, 814551).unwrap());
+    let block = std::fs::read(
+        "src/tests/data/18AFCDD25BE0989CE516504263EB351818A0FF8F6AB3689501C8E3B767EF413C.boc",
+    )
+    .unwrap();
+    let block = Block::construct_from_bytes(&block).unwrap();
+    assert_eq!("17b00540960604", block_order(&block, 123).unwrap());
+}
+
+#[test]
+fn test_helper_formatters_and_scalar_serializers() {
+    assert_eq!(u64_to_string(15), "0f");
+    assert_eq!(bigint_to_string(&BigInt::from(255)), "01ff");
+    assert!(bigint_to_string(&BigInt::from(-255)).starts_with('-'));
+    assert_eq!(shard_to_string(0xABCD), "000000000000abcd");
+
+    let mut map = serde_json::Map::new();
+    serialize_grams(&mut map, "grams", &15u64.into(), SerializationMode::Standart);
+    serialize_u64(&mut map, "count", &31, SerializationMode::QServer);
+    serialize_lt(&mut map, "lt", &1_000_123, SerializationMode::Debug);
+    serialize_bigint(&mut map, "delta", &BigInt::from(-42), SerializationMode::Standart);
+
+    assert_eq!(map["grams_dec"], "15");
+    assert_eq!(map["grams"], "00f");
+    assert_eq!(map["count"], "0x1f");
+    assert_eq!(map["lt"], "1_123");
+    assert_eq!(map["delta_dec"], "-42");
+    assert!(map["delta"].as_str().unwrap().starts_with('-'));
+}
+
+#[test]
+fn test_construct_address_uses_std_and_var_forms() {
+    let std_addr = construct_address(0, AccountId::from([1; 32])).unwrap();
+    let var_addr = construct_address(300, SliceData::new(vec![0xAA, 0x80])).unwrap();
+
+    assert!(matches!(std_addr, MsgAddressInt::AddrStd(_)));
+    assert!(matches!(var_addr, MsgAddressInt::AddrVar(_)));
+}
+
+#[test]
+fn test_block_order_rejects_wrong_masterchain_seqno() {
+    let block = std::fs::read(
+        "src/tests/data/89ED400A43E76664437EFC9C79B84AC387493A9EE5E789338FF71C25F54218BE.boc",
+    )
+    .unwrap();
+    let block = Block::construct_from_bytes(&block).unwrap();
+
+    assert!(block_order(&block, 1).is_err());
+}
+
+#[test]
+fn test_serialization_mode_helpers() {
+    assert!(SerializationMode::Standart.is_standart());
+    assert!(!SerializationMode::QServer.is_standart());
+    assert!(!SerializationMode::Debug.is_standart());
+
+    assert!(!SerializationMode::Standart.is_q_server());
+    assert!(SerializationMode::QServer.is_q_server());
+    assert!(SerializationMode::Debug.is_q_server());
+}
+
+#[test]
+fn test_signed_currency_collection_from_cc_add_and_sub() {
+    let empty = SignedCurrencyCollection::new();
+    assert_eq!(empty.grams.to_string(), "0");
+    assert!(empty.other.is_empty());
+
+    let mut left = CurrencyCollection::with_grams(10);
+    left.set_other(1, 20).unwrap();
+    left.set_other(2, 30).unwrap();
+    let mut signed = SignedCurrencyCollection::from_cc(&left).unwrap();
+    assert_eq!(signed.grams.to_string(), "10");
+    assert_eq!(signed.other[&1].to_string(), "20");
+    assert_eq!(signed.other[&2].to_string(), "30");
+
+    let mut right = CurrencyCollection::with_grams(4);
+    right.set_other(2, 5).unwrap();
+    right.set_other(3, 7).unwrap();
+    let right = SignedCurrencyCollection::from_cc(&right).unwrap();
+
+    signed.add(&right);
+    assert_eq!(signed.grams.to_string(), "14");
+    assert_eq!(signed.other[&1].to_string(), "20");
+    assert_eq!(signed.other[&2].to_string(), "35");
+    assert_eq!(signed.other[&3].to_string(), "7");
+
+    signed.sub(&right);
+    assert_eq!(signed.grams.to_string(), "10");
+    assert_eq!(signed.other[&1].to_string(), "20");
+    assert_eq!(signed.other[&2].to_string(), "30");
+    assert_eq!(signed.other[&3].to_string(), "0");
+}
+
+#[cfg(feature = "ton")]
+fn se_deserialise_remp_status(status: RempMessageStatus) {
+    let rr = tvm_api::ton::ton_node::rempreceipt::RempReceipt {
+        message_id: "18AFCDD25BE0989CE516504263EB351818A0FF8F6AB3689501C8E3B767EF413C"
+            .parse()
+            .unwrap(),
+        status,
+        timestamp: 1640011209924,
+        source_id: "18AFCDD25BE0989CE516504263EB351818A0FF8F6AB368950888E3B767EF413C"
+            .parse()
+            .unwrap(),
+    }
+    .into_boxed();
+    let signature = vec![1, 2, 3, 4];
+
+    let json = serde_json::json!(db_serialize_remp_status(&rr, &signature).unwrap()).to_string();
+    println!("{}", json);
+
+    let map = serde_json::from_str::<Map<String, Value>>(&json).unwrap();
+    let (rr1, signature1) = crate::deserialize::parse_remp_status(&map).unwrap();
+
+    assert_eq!(rr, rr1);
+    assert_eq!(signature, signature1);
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_accepted() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempAccepted(
+        rempmessagestatus::RempAccepted {
+            level: RempMessageLevel::TonNode_RempMasterchain,
+            block_id: BlockIdExt::with_params(
+                tvm_block::ShardIdent::with_tagged_prefix(0, 0x3800_0000_0000_0000).unwrap(),
+                1830539,
+                "18AFCDD25BE0989CE516504263EB356618A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+                "18AFCDD25BE0989CE516554263EB351818A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+            ),
+            master_id: BlockIdExt::with_params(
+                tvm_block::ShardIdent::with_tagged_prefix(-1, 0x8000_0000_0000_0000).unwrap(),
+                1830539,
+                "18AFCD115BE0989CE516504263EB356618A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+                "18AFC2225BE0989CE516554263EB351818A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+            ),
+        },
+    ));
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_duplicate() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempDuplicate(
+        rempmessagestatus::RempDuplicate {
+            block_id: BlockIdExt::with_params(
+                tvm_block::ShardIdent::with_tagged_prefix(0, 0x3800_0000_0000_0000).unwrap(),
+                1830539,
+                "18AFCDD25BE0989CE516504263EB356618A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+                "18AFCDD25BE0989CE516554263EB351818A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+            ),
+        },
+    ));
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_ignored() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempIgnored(
+        rempmessagestatus::RempIgnored {
+            level: RempMessageLevel::TonNode_RempMasterchain,
+            block_id: BlockIdExt::with_params(
+                tvm_block::ShardIdent::with_tagged_prefix(0, 0x3800_0000_0000_0000).unwrap(),
+                1830539,
+                "18AFCDD25BE0989CE516504263EB356618A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+                "18AFCDD25BE0989CE516554263EB351818A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+            ),
+        },
+    ));
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_new() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempNew);
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_rejected() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempRejected(
+        rempmessagestatus::RempRejected {
+            level: RempMessageLevel::TonNode_RempMasterchain,
+            block_id: BlockIdExt::with_params(
+                tvm_block::ShardIdent::with_tagged_prefix(0, 0x3800_0000_0000_0000).unwrap(),
+                1830539,
+                "18AFCDD25BE0989CE516504263EB356618A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+                "18AFCDD25BE0989CE516554263EB351818A0FF8F6AB3689501C8E3B767EF413C".parse().unwrap(),
+            ),
+            error: "eror 1 2 3".to_string(),
+        },
+    ));
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_sent() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempSentToValidators(
+        rempmessagestatus::RempSentToValidators { sent_to: 10, total_validators: 11 },
+    ));
+}
+
+#[test]
+#[cfg(feature = "ton")]
+fn test_se_deserialise_remp_timeout() {
+    se_deserialise_remp_status(RempMessageStatus::TonNode_RempTimeout);
+}

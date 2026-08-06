@@ -1,0 +1,188 @@
+// Copyright 2018-2021 TON Labs LTD.
+//
+// Licensed under the SOFTWARE EVALUATION License (the "License"); you may not
+// use this file except in compliance with the License.
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific TON DEV software governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+
+use aes::Aes128;
+use aes::Aes192;
+use aes::Aes256;
+use base64::Engine;
+use cbc::cipher::BlockDecryptMut;
+use cbc::cipher::BlockEncryptMut;
+use cbc::cipher::KeyIvInit;
+use cbc::cipher::block_padding::NoPadding;
+
+/// AES block size in bytes (128 bits = 16 bytes), same for all AES variants.
+const AES_BLOCK_SIZE: usize = 16;
+use tvm_types::base64_encode;
+use zeroize::ZeroizeOnDrop;
+
+use super::CipherMode;
+use super::EncryptionBox;
+use super::EncryptionBoxInfo;
+use crate::ClientContext;
+use crate::crypto::Error;
+use crate::crypto::internal::SecretBuf;
+use crate::crypto::internal::hex_decode_secret;
+use crate::encoding::base64_decode;
+use crate::encoding::hex_decode;
+use crate::error::ClientResult;
+
+#[derive(Serialize, Deserialize, Clone, Debug, ApiType, Default, PartialEq, ZeroizeOnDrop)]
+pub struct AesParamsEB {
+    #[zeroize(skip)]
+    pub mode: CipherMode,
+    pub key: String,
+    #[zeroize(skip)]
+    pub iv: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, ApiType, Default)]
+pub struct AesInfo {
+    pub mode: CipherMode,
+    pub iv: Option<String>,
+}
+
+pub struct AesEncryptionBox {
+    key: SecretBuf,
+    mode: CipherMode,
+    iv: Vec<u8>,
+}
+
+impl AesEncryptionBox {
+    pub fn new(params: AesParamsEB) -> ClientResult<Self> {
+        let iv_required = match params.mode {
+            CipherMode::CBC => true,
+            _ => return Err(Error::unsupported_cipher_mode(&format!("{:?}", params.mode))),
+        };
+        if iv_required && params.iv.is_none() {
+            return Err(Error::iv_required(&params.mode));
+        }
+        let key = hex_decode_secret(&params.key)?;
+        if key.len() != 16 && key.len() != 24 && key.len() != 32 {
+            return Err(Error::invalid_key_size(key.len(), &[128, 192, 256]));
+        }
+        let iv = params
+            .iv
+            .as_ref()
+            .map(|string| {
+                let iv = hex_decode(string)?;
+                if iv.len() == AES_BLOCK_SIZE {
+                    Ok(iv)
+                } else {
+                    Err(Error::invalid_iv_size(iv.len(), AES_BLOCK_SIZE))
+                }
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        Ok(Self { key, iv, mode: params.mode.clone() })
+    }
+
+    fn encrypt_cbc<
+        C: cbc::cipher::BlockEncrypt + cbc::cipher::BlockCipher + cbc::cipher::KeyInit,
+    >(
+        key: &[u8],
+        iv: &[u8],
+        data: &mut Vec<u8>,
+        size: usize,
+    ) -> ClientResult<()> {
+        // Pad to block boundary with zeros (matching old ZeroPadding behavior)
+        let padded_size = if size % AES_BLOCK_SIZE == 0 {
+            size
+        } else {
+            (size / AES_BLOCK_SIZE + 1) * AES_BLOCK_SIZE
+        };
+        data.resize(padded_size, 0);
+        let encryptor =
+            cbc::Encryptor::<C>::new_from_slices(key, iv).map_err(Error::cannot_create_cipher)?;
+        // encrypt_padded_mut with NoPadding since we already padded with zeros
+        encryptor
+            .encrypt_padded_mut::<NoPadding>(data, padded_size)
+            .map_err(|err| Error::encrypt_data_error(format!("{:#?}", err)))?;
+        Ok(())
+    }
+
+    fn decrypt_cbc<
+        C: cbc::cipher::BlockDecrypt + cbc::cipher::BlockCipher + cbc::cipher::KeyInit,
+    >(
+        key: &[u8],
+        iv: &[u8],
+        data: &mut [u8],
+    ) -> ClientResult<()> {
+        let decryptor =
+            cbc::Decryptor::<C>::new_from_slices(key, iv).map_err(Error::cannot_create_cipher)?;
+        decryptor
+            .decrypt_padded_mut::<NoPadding>(data)
+            .map_err(|err| Error::decrypt_data_error(format!("{:#?}", err)))?;
+        Ok(())
+    }
+
+    fn decode_base64_aligned(data: &str, align: usize) -> ClientResult<(Vec<u8>, usize)> {
+        let data_size = data.len().div_ceil(4) * 3;
+        let aligned_size = (data_size + align - 1) & !(align - 1);
+
+        let mut vec = vec![0u8; aligned_size];
+
+        let size = base64::engine::general_purpose::STANDARD
+            .decode_slice(data, &mut vec)
+            .map_err(|err| crate::client::Error::invalid_base64(data, err))?;
+
+        Ok((vec, size))
+    }
+}
+
+#[async_trait::async_trait]
+impl EncryptionBox for AesEncryptionBox {
+    /// Gets encryption box information
+    async fn get_info(&self, _context: Arc<ClientContext>) -> ClientResult<EncryptionBoxInfo> {
+        let iv = if !self.iv.is_empty() { Some(hex::encode(&self.iv)) } else { None };
+
+        let aes_info = AesInfo { mode: self.mode.clone(), iv };
+
+        Ok(EncryptionBoxInfo {
+            algorithm: Some("AES".to_owned()),
+            hdpath: None,
+            public: None,
+            options: Some(json!(aes_info)),
+        })
+    }
+
+    /// Encrypts data
+    async fn encrypt(&self, _context: Arc<ClientContext>, data: &String) -> ClientResult<String> {
+        let (mut data, size) = Self::decode_base64_aligned(data, AES_BLOCK_SIZE)?;
+        match (self.key.len(), &self.mode) {
+            (16, CipherMode::CBC) => {
+                Self::encrypt_cbc::<Aes128>(&self.key, &self.iv, &mut data, size)?
+            }
+            (24, CipherMode::CBC) => {
+                Self::encrypt_cbc::<Aes192>(&self.key, &self.iv, &mut data, size)?
+            }
+            (32, CipherMode::CBC) => {
+                Self::encrypt_cbc::<Aes256>(&self.key, &self.iv, &mut data, size)?
+            }
+            _ => return Err(Error::unsupported_cipher_mode(&format!("{:?}", self.mode))),
+        };
+        Ok(base64_encode(&data))
+    }
+
+    /// Decrypts data
+    async fn decrypt(&self, _context: Arc<ClientContext>, data: &String) -> ClientResult<String> {
+        let mut data = base64_decode(data)?;
+        match (self.key.len(), &self.mode) {
+            (16, CipherMode::CBC) => Self::decrypt_cbc::<Aes128>(&self.key, &self.iv, &mut data)?,
+            (24, CipherMode::CBC) => Self::decrypt_cbc::<Aes192>(&self.key, &self.iv, &mut data)?,
+            (32, CipherMode::CBC) => Self::decrypt_cbc::<Aes256>(&self.key, &self.iv, &mut data)?,
+            _ => return Err(Error::unsupported_cipher_mode(&format!("{:?}", self.mode))),
+        }
+        Ok(base64_encode(&data))
+    }
+}

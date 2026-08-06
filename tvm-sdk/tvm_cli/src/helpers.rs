@@ -1,0 +1,1498 @@
+// Copyright 2018-2023 EverX.
+//
+// Licensed under the SOFTWARE EVALUATION License (the "License"); you may not
+// use this file except in compliance with the License.
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific TON DEV software governing permissions and
+// limitations under the License.
+
+// 2022-2025 (c) Copyright Contributors to the GOSH DAO. All rights reserved.
+//
+
+use std::env;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::SystemTime;
+
+use clap::ArgMatches;
+use serde_json::Map;
+use serde_json::Value;
+use serde_json::json;
+use tvm_block::Account;
+use tvm_block::CurrencyCollection;
+use tvm_block::Deserializable;
+use tvm_block::MsgAddressInt;
+use tvm_block::Serializable;
+use tvm_block::StateInit;
+use tvm_client::ClientConfig;
+use tvm_client::ClientContext;
+use tvm_client::abi::Abi;
+use tvm_client::abi::AbiConfig;
+use tvm_client::abi::AbiContract;
+use tvm_client::abi::DecodedMessageBody;
+use tvm_client::abi::DeploySet;
+use tvm_client::abi::ParamsOfDecodeMessageBody;
+use tvm_client::abi::ParamsOfEncodeMessage;
+use tvm_client::abi::Signer;
+use tvm_client::account;
+use tvm_client::account::ResultOfGetAccount;
+use tvm_client::boc::internal::serialize_cell_to_base64;
+use tvm_client::crypto::CryptoConfig;
+use tvm_client::crypto::KeyPair;
+use tvm_client::crypto::MnemonicDictionary;
+use tvm_client::error::ClientError;
+use tvm_client::net::NetworkConfig;
+use tvm_client::net::OrderBy;
+use tvm_client::net::ParamsOfQuery;
+use tvm_client::net::ParamsOfQueryCollection;
+use tvm_client::net::query_collection;
+use tvm_executor::BlockchainConfig;
+use tvm_types::base64_decode;
+use tvm_types::base64_encode;
+use url::Url;
+
+use crate::FullConfig;
+use crate::call::parse_params;
+use crate::config::Config;
+use crate::config::LOCALNET;
+use crate::debug::debug_level_from_env;
+use crate::replay::CONFIG_ADDR;
+use crate::replay::construct_blockchain_config;
+use crate::resolve_net_name;
+pub const HD_PATH: &str = "m/44'/1331'/0'/0/0";
+pub const WORD_COUNT: u8 = 12;
+
+const DEPRECATED_CONFIG_BASE_NAME: &str = "tonos-cli.conf.json";
+const CONFIG_BASE_NAME: &str = "tvm-cli.conf.json";
+const DEPRECATED_GLOBAL_CONFIG_PATH: &str = ".tonos-cli.global.conf.json";
+const GLOBAL_CONFIG_PATH: &str = ".tvm-cli.global.conf.json";
+
+// todo: rewrite `config.url`, `config.endpoints[]`, `endpoints_map{}` and
+// `path`
+pub fn default_config_name() -> String {
+    match env::current_dir() {
+        Ok(dir) => {
+            let new = dir.join(PathBuf::from(CONFIG_BASE_NAME));
+            let old = dir.join(PathBuf::from(DEPRECATED_CONFIG_BASE_NAME));
+
+            if !new.exists() && old.exists() {
+                let _ = std::fs::rename(&old, &new);
+            }
+
+            new.to_string_lossy().into_owned()
+        }
+        Err(_) => CONFIG_BASE_NAME.to_string(),
+    }
+}
+
+pub fn global_config_path() -> String {
+    match env::current_exe() {
+        Ok(exe_path) => {
+            let mut new = exe_path.clone();
+            new.set_file_name(GLOBAL_CONFIG_PATH);
+
+            let mut old = exe_path;
+            old.set_file_name(DEPRECATED_GLOBAL_CONFIG_PATH);
+
+            if !new.exists() && old.exists() {
+                let _ = std::fs::rename(&old, &new);
+            }
+
+            new.to_string_lossy().into_owned()
+        }
+        Err(_) => GLOBAL_CONFIG_PATH.to_string(),
+    }
+}
+
+struct LogFile {
+    path: String,
+    file: Mutex<std::fs::File>,
+}
+
+struct LogFilter {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+impl LogFilter {
+    fn parse(spec: &str) -> Self {
+        let mut include = Vec::new();
+        let mut exclude = Vec::new();
+        for token in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(module) = token.strip_prefix('-') {
+                exclude.push(module.to_string());
+            } else {
+                include.push(token.to_string());
+            }
+        }
+        LogFilter { include, exclude }
+    }
+
+    fn allows(&self, target: &str) -> bool {
+        if self.exclude.iter().any(|e| target.starts_with(e.as_str())) {
+            return false;
+        }
+        if self.include.is_empty() {
+            return true;
+        }
+        self.include.iter().any(|i| target.starts_with(i.as_str()))
+    }
+}
+
+static LOG_FILE: OnceLock<LogFile> = OnceLock::new();
+static LOG_FILTER: OnceLock<LogFilter> = OnceLock::new();
+static JSON_MODE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_json_mode(enabled: bool) {
+    JSON_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub(crate) fn is_json_mode() -> bool {
+    JSON_MODE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn init_log_file(path: &str) -> Result<(), String> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("failed to open log file '{}': {}", path, e))?;
+    LOG_FILE
+        .set(LogFile { path: path.to_string(), file: Mutex::new(file) })
+        .map_err(|_| "log file already initialized".to_string())
+}
+
+pub(crate) fn init_log_filter(spec: &str) {
+    let _ = LOG_FILTER.set(LogFilter::parse(spec));
+}
+
+pub(crate) fn has_log_file() -> bool {
+    LOG_FILE.get().is_some()
+}
+
+pub(crate) fn log_file_path() -> Option<&'static str> {
+    LOG_FILE.get().map(|lf| lf.path.as_str())
+}
+
+pub(crate) fn write_log_record(record: &log::Record) {
+    if let Some(filter) = LOG_FILTER.get() {
+        if !filter.allows(record.target()) {
+            return;
+        }
+    }
+    if let Some(lf) = LOG_FILE.get() {
+        if let Ok(mut file) = lf.file.lock() {
+            let _ = writeln!(
+                file,
+                "[{} {:5} {}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.level(),
+                record.target(),
+                record.args()
+            );
+        }
+    }
+}
+
+pub(crate) fn log_startup_info() {
+    if let Some(lf) = LOG_FILE.get() {
+        if let Ok(mut file) = lf.file.lock() {
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+            let args: Vec<String> = std::env::args().collect();
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            let _ = writeln!(file, "[{now} INFO  tvm_cli] === tvm-cli session started ===");
+            let _ = writeln!(file, "[{now} INFO  tvm_cli]   args: {}", args.join(" "));
+            let _ = writeln!(file, "[{now} INFO  tvm_cli]   cwd: {cwd}");
+        }
+    }
+}
+
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        if has_log_file() {
+            write_log_record(record);
+            return;
+        }
+        if is_json_mode() {
+            return;
+        }
+        match record.level() {
+            log::Level::Error | log::Level::Warn => {
+                eprintln!("{}", record.args());
+            }
+            _ => {
+                println!("{}", record.args());
+            }
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+pub fn read_keys(filename: &str) -> Result<KeyPair, String> {
+    let keys_str = std::fs::read_to_string(filename)
+        .map_err(|e| format!("failed to read the keypair file: {}", e))?;
+    let keys: KeyPair =
+        serde_json::from_str(&keys_str).map_err(|e| format!("failed to load keypair: {}", e))?;
+    Ok(keys)
+}
+
+#[derive(Debug)]
+pub struct SdkAddress {
+    /// Invariant: always `Some` after `from_str` (the strict parser
+    /// requires a dapp_id). The `Option` is retained only to avoid churn
+    /// in call sites that still pattern-match on it.
+    pub dapp_id: Option<String>,
+    pub account_id: String,
+}
+
+impl SdkAddress {
+    pub fn validate(s: &str) -> Result<String, String> {
+        Ok(Self::from_str(s)?.to_string())
+    }
+}
+// Format:
+// dapp_hex64::account_hex64
+
+pub(crate) fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn strict_address_error(input: &str) -> String {
+    format!(
+        "address `{input}` must be in the form `dapp_id::account_id` \
+         (two 64-character hex ids, no 0x, no workchain); legacy `0:…`, \
+         bare-hex, single-colon and 128-hex forms are no longer accepted"
+    )
+}
+
+impl FromStr for SdkAddress {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (dapp, account) = s.split_once("::").ok_or_else(|| strict_address_error(s))?;
+        if !is_hex64(dapp) || !is_hex64(account) {
+            return Err(strict_address_error(s));
+        }
+        // Defensive: the account half must be a valid internal address.
+        // A bare 64-hex id resolves to workchain 0.
+        let _ = MsgAddressInt::from_str(account).map_err(|e| {
+            format!("Address is specified in the wrong format. Error description: {}", e)
+        })?;
+        Ok(Self { dapp_id: Some(dapp.to_owned()), account_id: account.to_owned() })
+    }
+}
+
+impl Display for SdkAddress {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(dapp_id) = &self.dapp_id {
+            f.write_str(dapp_id)?;
+            f.write_str("::")?;
+        }
+        f.write_str(&self.account_id)?;
+        Ok(())
+    }
+}
+
+/// Strips a leading `0:` workchain prefix from an account string and
+/// validates that the remainder is a 64-character hex string.
+/// Returns the account_id (no workchain, no 0x).
+pub fn strip_workchain(s: &str) -> Result<String, String> {
+    let account = match s.split_once(':') {
+        Some(("0", rest)) => rest,
+        Some((wc, _)) => return Err(format!("non-zero workchain not supported: {wc}")),
+        None => s,
+    };
+    if account.len() != 64 || !account.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("account_id must be a 64-character hex string, got: {account}"));
+    }
+    Ok(account.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use serde_json::json;
+
+    use super::SdkAddress;
+    use super::extract_message_boc;
+
+    const DAPP_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ACCOUNT_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const RAW_ADDRESS: &str = "0:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn sdk_address_from_str_accepts_dapp_double_colon_account() {
+        let address = SdkAddress::from_str(&format!("{DAPP_ID}::{ACCOUNT_ID}")).unwrap();
+
+        assert_eq!(address.dapp_id.as_deref(), Some(DAPP_ID));
+        assert_eq!(address.account_id, ACCOUNT_ID);
+        // Display round-trips back through the strict parser (double colon).
+        assert_eq!(address.to_string(), format!("{DAPP_ID}::{ACCOUNT_ID}"));
+        assert!(SdkAddress::from_str(&address.to_string()).is_ok());
+    }
+
+    #[test]
+    fn sdk_address_from_str_accepts_mixed_case_hex() {
+        let dapp = DAPP_ID.to_uppercase();
+        let address = SdkAddress::from_str(&format!("{dapp}::{ACCOUNT_ID}")).unwrap();
+
+        assert_eq!(address.dapp_id.as_deref(), Some(dapp.as_str()));
+        assert_eq!(address.account_id, ACCOUNT_ID);
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_workchain_form() {
+        let err = SdkAddress::from_str(RAW_ADDRESS).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_masterchain_form() {
+        let masterchain = format!("-1:{ACCOUNT_ID}");
+        let err = SdkAddress::from_str(&masterchain).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_bare_hex() {
+        let err = SdkAddress::from_str(ACCOUNT_ID).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_single_colon() {
+        let err = SdkAddress::from_str(&format!("{DAPP_ID}:{ACCOUNT_ID}")).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_concatenated_128_hex() {
+        let err = SdkAddress::from_str(&format!("{DAPP_ID}{ACCOUNT_ID}")).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_workchain_in_account_half() {
+        // dapp::0:acc — the account half carries a workchain, which is invalid.
+        let err = SdkAddress::from_str(&format!("{DAPP_ID}::{RAW_ADDRESS}")).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_short_dapp_id() {
+        let err = SdkAddress::from_str(&format!("deadbeef::{ACCOUNT_ID}")).unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn sdk_address_from_str_rejects_empty_double_colon() {
+        let err = SdkAddress::from_str("::").unwrap_err();
+        assert!(err.contains("dapp_id::account_id"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_message_boc_reads_blockchain_message_response() {
+        let boc = extract_message_boc(json!({
+            "data": {
+                "blockchain": {
+                    "message": {
+                        "boc": "te6ccgEBAQEA"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(boc, "te6ccgEBAQEA");
+    }
+
+    #[test]
+    fn extract_message_boc_reports_missing_message() {
+        let err = extract_message_boc(json!({
+            "data": {
+                "blockchain": {
+                    "message": null
+                }
+            }
+        }))
+        .unwrap_err();
+
+        assert_eq!(err, "message with specified id was not found.");
+    }
+
+    use super::strip_workchain;
+
+    #[test]
+    fn strip_workchain_removes_zero_workchain() {
+        assert_eq!(
+            strip_workchain("0:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn strip_workchain_accepts_bare_hex() {
+        let bare = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(strip_workchain(bare).unwrap(), bare);
+    }
+
+    #[test]
+    fn strip_workchain_rejects_non_zero_workchain() {
+        let s = "1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(strip_workchain(s).is_err());
+    }
+
+    #[test]
+    fn strip_workchain_rejects_bad_length() {
+        let s = "0:abc";
+        assert!(strip_workchain(s).is_err());
+    }
+
+    #[test]
+    fn strip_workchain_rejects_non_hex_account() {
+        let s = "0:zzzz456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(strip_workchain(s).is_err());
+    }
+}
+
+pub fn now() -> u32 {
+    (now_ms() / 1000) as u32
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_else(|e| panic!("failed to obtain system time: {}", e))
+        .as_millis() as u64
+}
+
+pub type TonClient = Arc<ClientContext>;
+pub type TvmClient = Arc<ClientContext>;
+
+pub fn create_client_local() -> Result<TonClient, String> {
+    let cli = ClientContext::new(ClientConfig::default())
+        .map_err(|e| format!("failed to create tonclient: {}", e))?;
+    Ok(Arc::new(cli))
+}
+
+pub fn get_server_endpoints(config: &Config) -> Vec<String> {
+    let mut cur_endpoints = match config.endpoints.len() {
+        0 => vec![config.url.clone()],
+        _ => config.endpoints.clone(),
+    };
+    cur_endpoints
+        .iter_mut()
+        .map(|end| {
+            let mut end = end.trim_end_matches('/').to_owned();
+            if config.project_id.is_some() {
+                end.push('/');
+                end.push_str(&config.project_id.clone().unwrap());
+            }
+            end.to_owned()
+        })
+        .collect::<Vec<String>>()
+}
+
+pub fn create_client(config: &Config) -> Result<TonClient, String> {
+    let modified_endpoints = get_server_endpoints(config);
+    if !config.is_json && !has_log_file() {
+        println!("Connecting to:\n\tUrl: {}", config.url);
+        println!("\tEndpoints: {:?}\n", modified_endpoints);
+    }
+    log::info!("Connecting to: url={}, endpoints={:?}", config.url, modified_endpoints);
+    let endpoints_cnt = if resolve_net_name(&config.url).unwrap_or(config.url.clone()).eq(LOCALNET)
+    {
+        1_u8
+    } else {
+        modified_endpoints.len() as u8
+    };
+    let cli_conf = ClientConfig {
+        abi: AbiConfig {
+            workchain: config.wc,
+            message_expiration_timeout: config.lifetime * 1000,
+            message_expiration_timeout_grow_factor: 1.3,
+        },
+        crypto: CryptoConfig {
+            mnemonic_dictionary: MnemonicDictionary::English,
+            mnemonic_word_count: WORD_COUNT,
+            hdkey_derivation_path: HD_PATH.to_string(),
+        },
+        network: NetworkConfig {
+            sending_endpoint_count: endpoints_cnt,
+            endpoints: if modified_endpoints.is_empty() { None } else { Some(modified_endpoints) },
+            message_retries_count: config.retries as i8,
+            message_processing_timeout: config.timeout,
+            wait_for_timeout: config.timeout,
+            out_of_sync_threshold: Some(config.out_of_sync_threshold * 1000),
+            access_key: config.access_key.clone(),
+            api_token: config.api_token.clone(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let cli =
+        ClientContext::new(cli_conf).map_err(|e| format!("failed to create tonclient: {}", e))?;
+    Ok(Arc::new(cli))
+}
+
+pub fn create_client_verbose(config: &Config) -> Result<TonClient, String> {
+    let level = if has_log_file() { log::LevelFilter::Trace } else { debug_level_from_env() };
+    log::set_max_level(level);
+    log::set_boxed_logger(Box::new(SimpleLogger))
+        .map_err(|e| format!("failed to init logger: {}", e))?;
+    create_client(config)
+}
+
+pub async fn query_raw(
+    config: &Config,
+    collection: &str,
+    filter: Option<&str>,
+    limit: Option<&str>,
+    order: Option<&str>,
+    result: &str,
+) -> Result<(), String> {
+    let context = create_client_verbose(config)?;
+
+    let filter = filter
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("Failed to parse filter field: {}", e))?;
+    let limit = limit
+        .map(|s| s.parse::<u32>())
+        .transpose()
+        .map_err(|e| format!("Failed to parse limit field: {}", e))?;
+    let order = order
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("Failed to parse order field: {}", e))?;
+
+    let query = tvm_client::net::query_collection(
+        context.clone(),
+        ParamsOfQueryCollection {
+            collection: collection.to_owned(),
+            filter,
+            limit,
+            order,
+            result: result.to_owned(),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| format!("Failed to execute query: {}", e))?;
+
+    println!("{:#}", Value::Array(query.result));
+    Ok(())
+}
+
+pub async fn query_with_limit(
+    ton: TonClient,
+    collection: &str,
+    filter: Value,
+    result: &str,
+    order: Option<Vec<OrderBy>>,
+    limit: Option<u32>,
+) -> Result<Vec<Value>, ClientError> {
+    query_collection(
+        ton,
+        ParamsOfQueryCollection {
+            collection: collection.to_owned(),
+            filter: Some(filter),
+            result: result.to_owned(),
+            order,
+            limit,
+            ..Default::default()
+        },
+    )
+    .await
+    .map(|r| r.result)
+}
+
+pub async fn query_message(ton: TonClient, message_id: &str) -> Result<String, String> {
+    let result = tvm_client::net::query(
+        ton,
+        ParamsOfQuery {
+            query: "query message($hash:String!){blockchain{message(hash:$hash){boc}}}".into(),
+            variables: Some(json!({
+                "hash": message_id,
+            })),
+        },
+    )
+    .await
+    .map_err(|e| format!("failed to query message: {}", e))?;
+
+    extract_message_boc(result.result)
+}
+
+fn extract_message_boc(mut response: Value) -> Result<String, String> {
+    let message = response
+        .pointer_mut("/data/blockchain/message")
+        .ok_or("Failed to obtain message from response.".to_string())?;
+
+    if message.is_null() {
+        return Err("message with specified id was not found.".to_string());
+    }
+
+    message["boc"]
+        .as_str()
+        .ok_or("Failed to obtain message boc.".to_string())
+        .map(ToString::to_string)
+}
+
+pub async fn query_account_field(
+    ton: TonClient,
+    address: &str,
+    field: &str,
+) -> Result<String, String> {
+    let sdk_address =
+        SdkAddress::from_str(address).map_err(|e| format!("invalid address `{address}`: {e}"))?;
+    let account_id = strip_workchain(&sdk_address.account_id)?;
+    let dapp_id = sdk_address.dapp_id.unwrap_or_default();
+    let params = account::ParamsOfGetAccount { account_id, dapp_id };
+    let result_of_get_acc = account::get_account(ton, params)
+        .await
+        .map_err(|e| format!("failed to get account: {e}"))?;
+
+    if field == "boc" {
+        return Ok(result_of_get_acc.boc);
+    }
+
+    if field != "data" {
+        return Err("Only boc and data field are supported".to_string());
+    }
+
+    let account = Account::construct_from_base64(&result_of_get_acc.boc)
+        .map_err(|e| format!("failed to construct account from boc: {e}"))?;
+
+    let state_init = account.state_init();
+
+    if state_init.is_none() {
+        return Err("account doesn't contain state_init".to_string());
+    }
+
+    let cell: Option<tvm_types::Cell> = state_init.unwrap().clone().data;
+
+    match cell {
+        Some(cell) => Ok(serialize_cell_to_base64(&cell, "account data").unwrap()),
+        None => Err("State init doesn't contain field data".to_string()),
+    }
+}
+
+pub async fn decode_msg_body(
+    ton: TonClient,
+    abi_path: &str,
+    body: &str,
+    is_internal: bool,
+    config: &Config,
+) -> Result<DecodedMessageBody, String> {
+    let abi = load_abi(abi_path, config).await?;
+    tvm_client::abi::decode_message_body(
+        ton,
+        ParamsOfDecodeMessageBody { abi, body: body.to_owned(), is_internal, ..Default::default() },
+    )
+    .map_err(|e| format!("failed to decode body: {}", e))
+}
+
+pub async fn load_abi_str(abi_path: &str, config: &Config) -> Result<String, String> {
+    let abi_from_json = serde_json::from_str::<AbiContract>(abi_path);
+    if abi_from_json.is_ok() {
+        return Ok(abi_path.to_string());
+    }
+    if Url::parse(abi_path).is_ok() {
+        let abi_bytes = load_file_with_url(abi_path, config.timeout as u64).await?;
+        return String::from_utf8(abi_bytes)
+            .map_err(|e| format!("Downloaded string contains not valid UTF8 characters: {}", e));
+    }
+    std::fs::read_to_string(abi_path).map_err(|e| format!("failed to read ABI file: {}", e))
+}
+
+pub async fn load_abi(abi_path: &str, config: &Config) -> Result<Abi, String> {
+    let abi_str = load_abi_str(abi_path, config).await?;
+    Ok(tvm_client::abi::Abi::Json(abi_str))
+}
+
+pub async fn load_ton_abi(abi_path: &str, config: &Config) -> Result<tvm_abi::Contract, String> {
+    let abi_str = load_abi_str(abi_path, config).await?;
+    tvm_abi::Contract::load(abi_str.as_bytes()).map_err(|e| format!("Failed to load ABI: {}", e))
+}
+
+pub async fn load_file_with_url(url: &str, timeout: u64) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout))
+        .build()
+        .map_err(|e| format!("Failed to create client: {e}"))?;
+    let res = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send get request: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to get response bytes: {e}"))?;
+    Ok(res.to_vec())
+}
+
+pub async fn calc_acc_address(
+    tvc: &[u8],
+    wc: i32,
+    pubkey: Option<String>,
+    init_data: Option<&str>,
+    abi: Abi,
+) -> Result<String, String> {
+    let data_map_supported = abi.abi().unwrap().data_map_supported();
+
+    let ton = create_client_local()?;
+    let dset = if data_map_supported {
+        let init_data_json = init_data
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| format!("initial data is not in json: {}", e))?;
+
+        DeploySet {
+            tvc: Some(base64_encode(tvc)),
+            workchain_id: Some(wc),
+            initial_data: init_data_json,
+            initial_pubkey: pubkey.clone(),
+            ..Default::default()
+        }
+    } else {
+        let init_data_json = insert_pubkey_to_init_data(pubkey.clone(), init_data)?;
+        let js = serde_json::from_str(init_data_json.as_str())
+            .map_err(|e| format!("initial data is not in json: {}", e))?;
+        DeploySet {
+            tvc: Some(base64_encode(tvc)),
+            workchain_id: Some(wc),
+            initial_data: js,
+            initial_pubkey: None, // initial_pubkey: pubkey.clone(),
+            ..Default::default()
+        }
+    };
+    let result = tvm_client::abi::encode_message(
+        ton.clone(),
+        ParamsOfEncodeMessage {
+            abi,
+            deploy_set: Some(dset),
+            signer: if pubkey.is_some() {
+                Signer::External { public_key: pubkey.unwrap() }
+            } else {
+                Signer::None
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| format!("cannot generate address: {}", e))?;
+    Ok(result.address)
+}
+
+pub fn answer_filter(src: &str, dst: &str, since: u32) -> serde_json::Value {
+    json!({
+        "src": { "eq": src },
+        "dst": { "eq": dst },
+        "created_at": {"ge": since }
+    })
+}
+
+pub fn events_filter(addr: &str, since: u32) -> serde_json::Value {
+    json!({
+        "src": { "eq": addr },
+        "msg_type": {"in": [2, 4] },
+        "created_at": {"ge": since }
+    })
+}
+
+pub async fn print_message(
+    ton: TonClient,
+    message: &Value,
+    abi: &str,
+    is_internal: bool,
+) -> Result<(String, String), String> {
+    println!("Id: {}", message["id"].as_str().unwrap_or("Undefined"));
+    let value = message["value"].as_str().unwrap_or("0x0");
+    let value = u64::from_str_radix(value.trim_start_matches("0x"), 16)
+        .map_err(|e| format!("failed to decode msg value: {}", e))?;
+    let value: f64 = value as f64 / 1e9;
+    println!("Value: {:.9}", value);
+    println!(
+        "Created at: {} ({})",
+        message["created_at"].as_u64().unwrap_or(0),
+        message["created_at_string"].as_str().unwrap_or("Undefined")
+    );
+
+    let body = message["body"].as_str();
+    if body.is_some() {
+        let body = body.unwrap();
+        let def_config = Config::default();
+        let result = tvm_client::abi::decode_message_body(
+            ton.clone(),
+            ParamsOfDecodeMessageBody {
+                abi: load_abi(abi, &def_config).await?,
+                body: body.to_owned(),
+                is_internal,
+                ..Default::default()
+            },
+        );
+        let (name, args) = if result.is_err() {
+            ("unknown".to_owned(), "{}".to_owned())
+        } else {
+            let result = result.unwrap();
+            (
+                result.name,
+                serde_json::to_string(&result.value)
+                    .map_err(|e| format!("failed to serialize the result: {}", e))?,
+            )
+        };
+        println!("Decoded body:\n{} {}\n", name, args);
+        return Ok((name, args));
+    }
+    println!();
+    Ok(("".to_owned(), "".to_owned()))
+}
+
+pub fn json_account(
+    acc_type: Option<String>,
+    address: Option<String>,
+    balance: Option<String>,
+    last_paid: Option<String>,
+    last_trans_lt: Option<String>,
+    data: Option<String>,
+    code_hash: Option<String>,
+    state_init: Option<String>,
+    state_timestamp: Option<u64>,
+) -> Value {
+    let mut map = Map::new();
+
+    if let Some(v) = acc_type {
+        map.insert("acc_type".into(), json!(v));
+    }
+    if let Some(v) = address {
+        map.insert("address".into(), json!(v));
+    }
+    if let Some(v) = balance {
+        map.insert("balance".into(), json!(v));
+    }
+    if let Some(v) = last_paid {
+        map.insert("last_paid".into(), json!(v));
+    }
+    if let Some(v) = last_trans_lt {
+        map.insert("last_trans_lt".into(), json!(v));
+    }
+    if let Some(v) = data {
+        map.insert("data_boc".into(), json!(v));
+    }
+    if let Some(v) = code_hash {
+        map.insert("code_hash".into(), json!(v));
+    }
+    if let Some(v) = state_init {
+        map.insert("state_init".into(), json!(v));
+    }
+    if let Some(v) = state_timestamp {
+        map.insert("state_timestamp".into(), json!(v));
+    }
+
+    Value::Object(map)
+}
+
+pub fn print_account(
+    config: &Config,
+    acc_type: Option<String>,
+    address: Option<String>,
+    balance: Option<String>,
+    last_paid: Option<String>,
+    last_trans_lt: Option<String>,
+    data: Option<String>,
+    code_hash: Option<String>,
+    state_init: Option<String>,
+    state_timestamp: Option<u64>,
+) {
+    if config.is_json {
+        let acc = json_account(
+            acc_type,
+            address,
+            balance,
+            last_paid,
+            last_trans_lt,
+            data,
+            code_hash,
+            state_init,
+            state_timestamp,
+        );
+        println!("{:#}", acc);
+    } else {
+        if acc_type.is_some() && acc_type.clone().unwrap() == "NonExist" {
+            println!("Account does not exist.");
+            return;
+        }
+        if address.is_some() {
+            println!("address:         {}", address.unwrap());
+        }
+        if acc_type.is_some() {
+            println!("acc_type:        {}", acc_type.unwrap());
+        }
+        if balance.is_some() {
+            println!("balance:         {}", balance.unwrap());
+        }
+        if last_paid.is_some() {
+            println!("last_paid:       {}", last_paid.unwrap());
+        }
+        if last_trans_lt.is_some() {
+            println!("last_trans_lt:   {}", last_trans_lt.unwrap());
+        }
+        if data.is_some() {
+            println!("data_boc:        {}", data.unwrap());
+        }
+        if code_hash.is_some() {
+            println!("code_hash:       {}", code_hash.unwrap());
+        }
+        if state_init.is_some() {
+            println!("state_init:      {}", state_init.unwrap());
+        }
+        if let Some(state_timestamp) = state_timestamp {
+            println!("state_timestamp: {}", state_timestamp);
+        }
+    }
+}
+
+pub fn construct_account_from_tvc(
+    tvc_path: &str,
+    address: Option<&str>,
+    balance: Option<u64>,
+) -> Result<Account, String> {
+    Account::active_by_init_code_hash(
+        match address {
+            Some(address) => MsgAddressInt::from_str(address)
+                .map_err(|e| format!("Failed to set address: {}", e))?,
+            _ => MsgAddressInt::default(),
+        },
+        match balance {
+            Some(balance) => CurrencyCollection::with_grams(balance),
+            _ => CurrencyCollection::default(),
+        },
+        0,
+        StateInit::construct_from_file(tvc_path)
+            .map_err(|e| format!(" failed to load TVC from the file {}: {}", tvc_path, e))?,
+        true,
+    )
+    .map_err(|e| format!(" failed to create account with the stateInit: {}", e))
+}
+
+pub fn check_dir(path: &str) -> Result<(), String> {
+    if !path.is_empty() && !std::path::Path::new(path).exists() {
+        std::fs::create_dir(path)
+            .map_err(|e| format!("Failed to create folder {}: {}", path, e))?;
+    }
+    Ok(())
+}
+
+#[derive(PartialEq)]
+pub enum AccountSource {
+    NETWORK,
+    BOC,
+    TVC,
+}
+
+pub async fn load_account(
+    source_type: &AccountSource,
+    source: &str,
+    tvm_client: Option<TonClient>,
+    config: &Config,
+) -> Result<(Account, String, Option<u64>), String> {
+    match source_type {
+        AccountSource::NETWORK => {
+            let ton_client = match tvm_client {
+                Some(tvm_client) => tvm_client,
+                None => create_client(config)?,
+            };
+
+            let sdk_address = SdkAddress::from_str(source)
+                .map_err(|e| format!("invalid address `{source}`: {e}"))?;
+            let account_id = strip_workchain(&sdk_address.account_id)?;
+            let dapp_id = sdk_address.dapp_id.unwrap_or_default();
+            let ResultOfGetAccount { boc, state_timestamp, .. } = account::get_account(
+                ton_client,
+                account::ParamsOfGetAccount { account_id, dapp_id },
+            )
+            .await
+            .map_err(|e| format!("Failed to get account: {e}"))?;
+
+            Ok((
+                Account::construct_from_base64(&boc)
+                    .map_err(|e| format!("Failed to construct account: {}", e))?,
+                boc,
+                state_timestamp,
+            ))
+        }
+        _ => {
+            let account = if source_type == &AccountSource::BOC {
+                Account::construct_from_file(source).map_err(|e| {
+                    format!(" failed to load account from the file {}: {}", source, e)
+                })?
+            } else {
+                construct_account_from_tvc(source, None, None)?
+            };
+            let account_bytes = account
+                .write_to_bytes()
+                .map_err(|e| format!(" failed to load data from the account: {}", e))?;
+            Ok((account, base64_encode(&account_bytes), None))
+        }
+    }
+}
+
+pub fn load_debug_info(abi: &str) -> Option<String> {
+    check_file_exists(abi, &[".json", ".abi"], &[".dbg.json", ".debug.json", ".map.json"])
+}
+
+pub fn load_abi_from_tvc(tvc: &str) -> Option<String> {
+    check_file_exists(tvc, &[".tvc"], &[".abi.json"])
+}
+
+pub fn check_file_exists(path: &str, trim: &[&str], ending: &[&str]) -> Option<String> {
+    let mut path = path;
+    for end in trim {
+        path = path.trim_end_matches(end);
+    }
+    let path = path.to_string();
+    for end in ending {
+        let mut new_path = path.clone();
+        new_path.push_str(end);
+        if std::path::Path::new(&new_path).exists() {
+            return Some(new_path);
+        }
+    }
+    None
+}
+
+pub fn abi_from_matches_or_config(matches: &ArgMatches, config: &Config) -> Result<String, String> {
+    matches
+        .value_of("ABI")
+        .map(|s| s.to_string())
+        .or(config.abi_path.clone())
+        .ok_or("ABI file is not defined. Supply it in the config file or command line.".to_string())
+}
+
+pub fn parse_lifetime(lifetime: Option<&str>, config: &Config) -> Result<u32, String> {
+    Ok(lifetime
+        .map(|val| {
+            u32::from_str_radix(val, 10).map_err(|e| format!("failed to parse lifetime: {}", e))
+        })
+        .transpose()?
+        .unwrap_or(config.lifetime))
+}
+
+#[macro_export]
+macro_rules! print_args {
+    ($( $arg:ident ),* ) => {
+        println!("Input arguments:");
+        $(
+            println!(
+                "{:>width$}: {}",
+                stringify!($arg),
+                if let Some(ref arg) = $arg { arg.as_ref() } else { "None" },
+                width = 8
+            );
+        )*
+    };
+}
+
+pub fn load_params(params: &str) -> Result<String, String> {
+    if params.find('{').is_none() {
+        std::fs::read_to_string(params)
+            .map_err(|e| format!("failed to load params from file: {}", e))
+    } else {
+        Ok(params.to_string())
+    }
+}
+
+pub async fn unpack_alternative_params(
+    matches: &ArgMatches,
+    abi_path: &str,
+    method: &str,
+    config: &Config,
+) -> Result<String, String> {
+    if let Some(params) = matches.values_of("PARAMS") {
+        let params = params.collect();
+        parse_params(params, abi_path, method, config).await
+    } else {
+        Ok(config.parameters.clone().unwrap_or("{}".to_string()))
+    }
+}
+
+pub fn wc_from_matches_or_config(matches: &ArgMatches, config: &Config) -> Result<i32, String> {
+    Ok(matches
+        .value_of("WC")
+        .map(|v| i32::from_str_radix(v, 10))
+        .transpose()
+        .map_err(|e| format!("failed to parse workchain id: {}", e))?
+        .unwrap_or(config.wc))
+}
+
+pub fn contract_data_from_matches_or_config_alias(
+    matches: &ArgMatches,
+    full_config: &FullConfig,
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    let address = matches
+        .value_of("ADDRESS")
+        .map(|s| s.to_string())
+        .or(full_config.config.addr.clone())
+        .ok_or(
+            "ADDRESS is not defined. Supply it in the config file or command line.".to_string(),
+        )?;
+    let (address, abi, keys) = if full_config.aliases.contains_key(&address) {
+        let alias = full_config.aliases.get(&address).unwrap();
+        (alias.address.clone(), alias.abi_path.clone(), alias.key_path.clone())
+    } else {
+        (Some(address), None, None)
+    };
+    let abi = matches
+        .value_of("ABI")
+        .map(|s| s.to_string())
+        .or(full_config.config.abi_path.clone())
+        .or(abi)
+        .ok_or(
+            "ABI file is not defined. Supply it in the config file or command line.".to_string(),
+        )?;
+    let keys = matches
+        .value_of("KEYS")
+        .map(|s| s.to_string())
+        .or(full_config.config.keys_path.clone())
+        .or(keys);
+    Ok((address, Some(abi), keys))
+}
+
+pub fn blockchain_config_from_default_json() -> Result<BlockchainConfig, String> {
+    // Default config params from evernode-se https://github.com/tonlabs/evernode-se/blob/master/docker/ton-node/blockchain.conf.json
+    let json = r#"{
+  "p0": "5555555555555555555555555555555555555555555555555555555555555555",
+  "p1": "3333333333333333333333333333333333333333333333333333333333333333",
+  "p2": "0000000000000000000000000000000000000000000000000000000000000000",
+  "p7": [],
+  "p8": {
+    "version": 5,
+    "capabilities": "1180974"
+  },
+  "p9": [
+    0,
+    1,
+    9,
+    10,
+    12,
+    14,
+    15,
+    16,
+    17,
+    18,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    28,
+    34
+  ],
+  "p10": [
+    0,
+    1,
+    9,
+    10,
+    12,
+    14,
+    15,
+    16,
+    17,
+    32,
+    34,
+    36,
+    4294966295,
+    4294966296,
+    4294966297
+  ],
+  "p11": {
+    "normal_params": {
+      "min_tot_rounds": 2,
+      "max_tot_rounds": 3,
+      "min_wins": 2,
+      "max_losses": 2,
+      "min_store_sec": 1000000,
+      "max_store_sec": 10000000,
+      "bit_price": 1,
+      "cell_price": 500
+    },
+    "critical_params": {
+      "min_tot_rounds": 4,
+      "max_tot_rounds": 7,
+      "min_wins": 4,
+      "max_losses": 2,
+      "min_store_sec": 5000000,
+      "max_store_sec": 20000000,
+      "bit_price": 2,
+      "cell_price": 1000
+    }
+  },
+  "p12": [
+    {
+      "workchain_id": 0,
+      "enabled_since": 1605687562,
+      "actual_min_split": 0,
+      "min_split": 4,
+      "max_split": 8,
+      "active": true,
+      "accept_msgs": true,
+      "flags": 0,
+      "zerostate_root_hash": "c52f085257330ec9b73b94a45b591f997849405a4de5b778edbde5f9775f9a8b",
+      "zerostate_file_hash": "bd1e95b4e69afbaf5b5186eeeca15a87e16c13feff53595ae6891c12a5790b05",
+      "version": 0,
+      "basic": true,
+      "vm_version": -1,
+      "vm_mode": 0
+    },
+    {
+      "workchain_id": 777,
+      "enabled_since": 1605687544,
+      "actual_min_split": 0,
+      "min_split": 5,
+      "max_split": 8,
+      "active": true,
+      "accept_msgs": false,
+      "flags": 0,
+      "zerostate_root_hash": "ee2f085257330ec9b73b94a45b591f997849405a4de5b778edbde5f9775f9a8b",
+      "zerostate_file_hash": "ff1e95b4e69afbaf5b5186eeeca15a87e16c13feff53595ae6891c12a5790b05",
+      "version": 0,
+      "basic": true,
+      "vm_version": -1,
+      "vm_mode": 0
+    }
+  ],
+  "p13": {
+    "boc": "te6ccgEBAQEADQAAFRpRdIdugAEBIB9I"
+  },
+  "p14": {
+    "masterchain_block_fee": "1700000000",
+    "basechain_block_fee": "1000000000"
+  },
+  "p15": {
+    "validators_elected_for": 14400,
+    "elections_start_before": 7200,
+    "elections_end_before": 1800,
+    "stake_held_for": 7200
+  },
+  "p16": {
+    "max_validators": 1000,
+    "max_main_validators": 100,
+    "min_validators": 5
+  },
+  "p17": {
+    "min_stake": "10000000000000",
+    "max_stake": "10000000000000000",
+    "min_total_stake": "100000000000000",
+    "max_stake_factor": 196608
+  },
+  "p18": [
+    {
+      "utime_since": 0,
+      "bit_price_ps": "1",
+      "cell_price_ps": "500",
+      "mc_bit_price_ps": "1000",
+      "mc_cell_price_ps": "500000"
+    }
+  ],
+  "p20": {
+    "flat_gas_limit": "1000",
+    "flat_gas_price": "10000000",
+    "gas_price": "655360000",
+    "gas_limit": "1000000",
+    "special_gas_limit": "100000000",
+    "gas_credit": "10000",
+    "block_gas_limit": "11000000",
+    "freeze_due_limit": "100000000",
+    "delete_due_limit": "1000000000"
+  },
+  "p21": {
+    "flat_gas_limit": "1000",
+    "flat_gas_price": "1000000",
+    "gas_price": "65536000",
+    "gas_limit": "1000000",
+    "special_gas_limit": "1000000",
+    "gas_credit": "10000",
+    "block_gas_limit": "10000000",
+    "freeze_due_limit": "100000000",
+    "delete_due_limit": "1000000000"
+  },
+  "p22": {
+    "bytes": {
+      "underload": 131072,
+      "soft_limit": 524288,
+      "hard_limit": 1048576
+    },
+    "gas": {
+      "underload": 900000,
+      "soft_limit": 1200000,
+      "hard_limit": 2000000
+    },
+    "lt_delta": {
+      "underload": 1000,
+      "soft_limit": 5000,
+      "hard_limit": 10000
+    }
+  },
+  "p23": {
+    "bytes": {
+      "underload": 131072,
+      "soft_limit": 524288,
+      "hard_limit": 1048576
+    },
+    "gas": {
+      "underload": 900000,
+      "soft_limit": 1200000,
+      "hard_limit": 2000000
+    },
+    "lt_delta": {
+      "underload": 1000,
+      "soft_limit": 5000,
+      "hard_limit": 10000
+    }
+  },
+  "p24": {
+    "lump_price": "10000000",
+    "bit_price": "655360000",
+    "cell_price": "65536000000",
+    "ihr_price_factor": 98304,
+    "first_frac": 21845,
+    "next_frac": 21845
+  },
+  "p25": {
+    "lump_price": "1000000",
+    "bit_price": "65536000",
+    "cell_price": "6553600000",
+    "ihr_price_factor": 98304,
+    "first_frac": 21845,
+    "next_frac": 21845
+  },
+  "p28": {
+    "shuffle_mc_validators": true,
+    "mc_catchain_lifetime": 250,
+    "shard_catchain_lifetime": 250,
+    "shard_validators_lifetime": 1000,
+    "shard_validators_num": 7
+  },
+  "p29": {
+    "new_catchain_ids": true,
+    "round_candidates": 3,
+    "next_candidate_delay_ms": 2000,
+    "consensus_timeout_ms": 16000,
+    "fast_attempts": 3,
+    "attempt_duration": 8,
+    "catchain_max_deps": 4,
+    "max_block_bytes": 2097152,
+    "max_collated_bytes": 2097152
+  },
+  "p31": [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "04f64c6afbff3dd10d8ba6707790ac9670d540f37a9448b0337baa6a5a92acac",
+    "3333333333333333333333333333333333333333333333333333333333333333"
+  ],
+  "p34": {
+    "utime_since": 1605687562,
+    "utime_until": 1605698362,
+    "total": 7,
+    "main": 7,
+    "total_weight": "119",
+    "list": [
+      {
+        "public_key": "5457fef5bf496f65ea64d1d8bb4a90694f61fe2787cdb67d16f9ffe548d0b8d9",
+        "weight": "17"
+      }
+    ]
+  }
+}"#;
+    let map = serde_json::from_str::<serde_json::Map<String, Value>>(json)
+        .map_err(|e| format!("Failed to parse config params as json: {e}"))?;
+    let config_params = tvm_block_json::parse_config(&map)
+        .map_err(|e| format!("Failed to parse config params: {e}"))?;
+    BlockchainConfig::with_config(config_params)
+        .map_err(|e| format!("Failed to construct default config: {e}"))
+}
+
+// loads blockchain config from the config contract boc, if it is none tries to
+// load config contract from the network, if it is unavailable returns default.
+pub async fn get_blockchain_config(
+    cli_config: &Config,
+    config_contract_boc_path: Option<&str>,
+) -> Result<BlockchainConfig, String> {
+    match config_contract_boc_path {
+        Some(config_path) => {
+            let acc = Account::construct_from_file(config_path).map_err(|e| {
+                format!("Failed to load config contract account from file {config_path}: {e}")
+            })?;
+            construct_blockchain_config(&acc)
+        }
+        None => {
+            let ton_client = create_client(cli_config)?;
+            let config = query_account_field(ton_client.clone(), CONFIG_ADDR, "boc").await;
+            let config_account = config.and_then(|config| {
+                Account::construct_from_base64(&config)
+                    .map_err(|e| format!("Failed to construct config account: {e}"))
+            });
+            match config_account {
+                Ok(config) => construct_blockchain_config(&config),
+                Err(_) => blockchain_config_from_default_json(),
+            }
+        }
+    }
+}
+
+pub fn decode_data(data: &str, param_name: &str) -> Result<Vec<u8>, String> {
+    if let Ok(data) = base64_decode(data) {
+        Ok(data)
+    } else if let Ok(data) = hex::decode(data) {
+        Ok(data)
+    } else {
+        Err(format!("the {} parameter should be base64 or hex encoded", param_name))
+    }
+}
+
+pub fn insert_pubkey_to_init_data(
+    pubkey: Option<String>,
+    opt_init_data: Option<&str>,
+) -> Result<String, String> {
+    let init_data = opt_init_data.unwrap_or("{}");
+
+    let mut js_init_data = serde_json::from_str(init_data)
+        .map_err(|e| format!("Failed to decode initial data as json: {}", e))?;
+    match &mut js_init_data {
+        Value::Object(obj) => {
+            if obj.contains_key(&"_pubkey".to_string()) {
+                return Err("Public key was set via init data. Please, use command line options --genkey/--setkey to set public key.".to_owned());
+            }
+            if let Some(pk) = pubkey {
+                let pubkey_str = format!("0x{}", pk);
+                obj.insert("_pubkey".to_string(), Value::String(pubkey_str));
+            }
+        }
+        _ => panic!("js_init_data is not Value::Object"),
+    }
+
+    Ok(js_init_data.to_string())
+}

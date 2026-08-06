@@ -1,0 +1,40 @@
+[package]
+name = "tvm_client_processing"
+#
+version.workspace = true
+rust-version.workspace = true
+#
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tvm_client_processing"
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+futures.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+#
+tvm_block.workspace = true
+tvm_types.workspace = true
+#
+api_derive = { path = "../api/derive" }
+api_info = { path = "../api/info" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+  "sync",
+  "rt-multi-thread",
+  "macros",
+  "time",
+  "net",
+  "fs",
+] }

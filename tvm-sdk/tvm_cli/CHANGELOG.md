@@ -1,0 +1,332 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [3.0.2] - 2026-06-15
+
+### Fixed
+- `call`/`callx` and other message-sending commands no longer fail with `code 11: Server responded with code 404` when targeting a node that serves only the REST message API and returns 404 on `/graphql`. The GraphQL server-version probe is now best-effort: when GraphQL is reachable its `info.version` is trusted as before; when it is unavailable the send proceeds using the current v3 wire format instead of aborting.
+- Decoding return values and bodies that span multiple cells no longer produces `WrongDataLayout` when the last field spills into a reference cell (off-by-32 fix in `tvm_abi`).
+
+## [3.0.1] - 2026-06-08
+
+### Fixed
+- Fixed `decode::tests::test_decode_body_json` to use an existing manifest-relative wallet ABI fixture instead of a missing `tests/samples/wallet.abi.json` path.
+
+## [3.0.0] - 2026-06-05
+
+### Changed (breaking)
+- Default HD key derivation path changed from `m/44'/396'/0'/0/0` to `m/44'/1331'/0'/0/0`. Key and address generation that rely on the default path now derive different keys from the same seed phrase. To keep previous keys, pass the old path explicitly.
+- Address inputs now require the `dapp_id::account_id` form on all commands and against all nodes. Legacy `0:<hex>`, bare-hex, single-colon, and 128-hex address forms are no longer accepted.
+- `deploy` and `deployx` now always require `--dst-dapp-id`, including `--fee` mode. Pass all zeros for a self-rooted dapp.
+
+### Added
+- `genaddr` additionally prints the `dapp_id::account_id` self-rooted address form (`dapp_account` in JSON output).
+
+### Fixed
+- Address values are passed through internal re-parsing in full `dapp_id::account_id` form, preserving destination dapp information across commands.
+
+## [2.24.19] - 2026-04-17
+
+### Added
+- Support for extended address parsing via `SdkAddress::from_str`, including `dapp_id` extraction from user-provided addresses.
+
+### Changed
+- `call`, `callx`, and proposal commands now derive destination `dapp_id` from extended addresses.
+- `deploy`, `deployx`, and `send` commands now accept explicit `--dst-dapp-id` where the destination `dapp_id` can not be derived from an address.
+
+### Fixed
+- Fixed `dump accounts` address validation for the current `SdkAddress` API.
+
+## [2.24.18] - 2026-04-13
+
+### Added
+- `--log-path` global option and `TVM_CLI_LOG_PATH` env var to redirect all log output to a file (append mode), keeping stdout/stderr clean for automation scripts
+- `--log-filter` option and `TVM_CLI_LOG_FILTER` env var for include/exclude module filtering (e.g. `tvm_client,-hyper`)
+- Session startup info (command-line arguments, working directory) is logged to the log file
+
+### Changed
+- Console log output is now suppressed in `--json` (`-j`) mode
+- Default console log level lowered from Warn to Error to reduce noise
+
+## [2.24.13] - 2026-03-03
+
+### Changed
+- Migrated CLI argument definitions to current clap v3 API, removing deprecated usage
+
+### Fixed
+- `--abi` argument is now required for the `genaddr` subcommand, preventing confusing runtime errors when omitted
+
+## 0.36.0
+
+ - Supported [ABI 2.4](https://github.com/tonlabs/ever-abi/blob/master/CHANGELOG.md#version-240)
+
+## 0.35.7
+
+### Bug fixes
+- Fixed double log initialization bug for runx subcommand
+
+## 0.35.6
+
+### New
+- Fixed double log initialization bug
+
+## 0.35.5
+
+### New
+- Migrated to ever-sdk 1.43.3
+
+## 0.35.4
+
+### New 
+- Added `test` command and subcommands: `config`, `deploy`, `sign`, `ticktock`
+- Added ability not to receive debug output for `debug` command using `nul` for output file name
+- Added ability to set `initial_balance` for account deployment
+
+## 0.34.1
+
+### New 
+- Fixed update_config command bug for solidity contracts
+
+## 0.34.0
+
+### New 
+- Flag `--v2` in `multisig` and `depool` subcommands to support multisig v2.
+
+## 0.33.0
+
+### New
+- Migrated to ever-sdk 0.41.1
+
+## Version: 0.30.1
+
+### New
+- Added the `sign` command. It makes ED25519 signature for data encoded in base64 or hex using common `--keys` option;
+
+## Version: 0.29.1
+
+### New
+- Added [sold](https://github.com/tonlabs/TON-Solidity-Compiler/tree/master/sold) functionality as feature;
+- Improved behavior of the `decode msg` command. Now it doesn't require `--base64` flag to decode base64 input. It can
+  also decode message by id in the blockchain and decode files with messages not in binary but with text in base64;
+- Changed `debug transaction` and `debug account` commands flag `--empty_config` to `--default_config` which uses 
+  current network config or default one if it is unavailable;
+- Removed option `--saved_config` from call and run commands.
+
+## Version: 0.28.12
+
+### New
+- Added ability to specify link to the abi file of json data instead of path.
+
+## Version: 0.28.3
+
+### Breaking changes:
+ - `debug` commands `call`, `run` and `deploy` now take function parameters in alternative syntax. 
+
+## Version: 0.28.1
+
+### New
+ - Updated version of SDK;
+ - Added global tonos-cli config which is used to create default configs;
+ - Added config parameters for Evercloud authentication;
+ - Added new input format for `tonos-cli decode message` command.
+
+## Version: 0.27.33
+
+### New
+- Added ability to call `account` command with address from config
+
+### Bug fixes
+- Fixed work with old config file
+
+
+## Version: 0.27.31
+
+### New
+ - Clear alternative syntax parameters
+ - Alias and abi methods completion
+
+
+## Version: 0.27.30
+
+### New
+- Added alias functionality
+- Added completion script to complete bash commands with aliases and abi methods.
+
+
+## Version: 0.27.26
+
+### New
+- Added `--now <value>` option for `debug message` command.
+
+## Version: 0.27.20
+
+### New
+- Enlarged decode fields for `decode body` command
+- Added sequence diagram rendering command
+
+## Version: 0.27.19
+
+### Bug fixes
+- Removed custom header from call command
+
+## Version: 0.27.6
+
+### Bug fixes
+- Fixed `debug run` gas limits
+
+
+## Version: 0.27.1
+
+### Breaking changes:
+ - Commands `convert` and `callex` were removed.
+
+
+## Version: 0.26.45
+
+### New
+ - `tokio` library updated to `1.*` version
+ 
+## Version: 0.26.44
+
+### New
+
+
+## Version: 0.26.35
+
+### New
+ - Add config param 42
+ - Update libraries
+
+
+## Version: 0.26.34
+
+### New
+ - Update libraries
+
+
+## Version: 0.26.30
+
+### New
+
+
+## Version: 0.26.28
+
+### New
+ - Added network test and improved giver for parallel debot tests
+ - Added Ubuntu 22 hint
+ - Fixed tests to work in parallel
+
+
+## Version: 0.26.26
+
+### New
+ - Fixed tests to work in parallel
+
+
+## Version: 0.26.24
+
+### New
+  - Libraries update
+
+## Version: 0.26.8
+
+### New
+ - Update endpoints
+ - Added --boc flag for account command
+
+
+## Version: 0.26.7
+
+### New
+
+
+## Version: 0.26.4
+
+### New
+
+
+## Version: 0.26.1
+
+### New
+ - Breaking change for getkeypair command: arguments are now specified with flags and can be omitted.
+
+
+## Version: 0.25.23
+
+### New
+
+## Version: 0.25.15
+
+
+### New
+ - Add support copyleft
+
+ 
+## Version: 0.25.11
+
+### New
+
+
+## Version: 0.25.7
+
+### New
+ - Unify genaddr abi param with other cmds
+ - Add &#x60;account-wait&#x60; subcommand
+ - Fixed client creation for local run
+ - Fixed a bug with run parameters
+ - Fixed runget
+ - Refactored and improved debug on fail
+ - inverted min_trace flag
+
+
+## Version: 0.25.6
+
+### New
+ - Add &#x60;account-wait&#x60; subcommand
+ - Fixed client creation for local run
+ - Fixed a bug with run parameters
+ - Fixed runget
+ - Refactored and improved debug on fail
+ - inverted min_trace flag
+
+
+## Version: 0.25.3
+
+### New
+ - Refactored and improved debug on fail
+ - inverted min_trace flag
+
+
+## Version: 0.25.2
+
+### New
+ - Refactored and improved debug on fail
+ - inverted min_trace flag
+
+
+## Version: 0.24.59
+
+### New
+ - Block replaying
+ - inverted min_trace flag
+
+
+## Version: 0.24.56
+
+### New
+
+
+## Version: 0.24.51
+
+### New
+
+
+## Version: 0.24.48
+
+### New
+
+
+## Version: 0.24.46
+
+### New

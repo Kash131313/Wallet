@@ -1,0 +1,11 @@
+# Info API
+
+Info query is used to get API version, as well as health parameters of the API, such as latency of blocks, messages and transactions
+
+```graphql
+query{
+  info{
+    version # API version
+  }
+}
+```

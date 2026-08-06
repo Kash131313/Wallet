@@ -1,7 +1,7 @@
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/fnv-834f935a7e7f2447.d: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fnv-1.0.7/lib.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/fnv-834f935a7e7f2447.d: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/fnv/lib.rs
 
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libfnv-834f935a7e7f2447.rlib: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fnv-1.0.7/lib.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libfnv-834f935a7e7f2447.rlib: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/fnv/lib.rs
 
-/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libfnv-834f935a7e7f2447.rmeta: /Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fnv-1.0.7/lib.rs
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/target/debug/deps/libfnv-834f935a7e7f2447.rmeta: /Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/fnv/lib.rs
 
-/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fnv-1.0.7/lib.rs:
+/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/fnv/lib.rs:

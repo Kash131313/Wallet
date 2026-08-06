@@ -1,0 +1,3514 @@
+// Copyright (C) 2019-2023 Everx. All Rights Reserved.
+//
+// Licensed under the SOFTWARE EVALUATION License (the "License"); you may not
+// use this file except in compliance with the License.
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific TON DEV software governing permissions and
+// limitations under the License.
+#![allow(clippy::too_many_arguments)]
+
+use std::cmp::min;
+#[cfg(feature = "wasmtime")]
+use std::collections::HashMap;
+#[cfg(feature = "wasmtime")]
+use std::collections::HashSet;
+use std::collections::LinkedList;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
+
+use tvm_block::AccStatusChange;
+use tvm_block::Account;
+use tvm_block::AccountState;
+use tvm_block::AccountStatus;
+use tvm_block::AddSub;
+use tvm_block::BASE_WORKCHAIN_ID;
+use tvm_block::CommonMsgInfo;
+use tvm_block::ComputeSkipReason;
+use tvm_block::CopyleftReward;
+use tvm_block::CurrencyCollection;
+use tvm_block::Deserializable;
+use tvm_block::ExtraCurrencyCollection;
+use tvm_block::GasLimitsPrices;
+use tvm_block::GetRepresentationHash;
+use tvm_block::GlobalCapabilities;
+use tvm_block::Grams;
+use tvm_block::HashUpdate;
+use tvm_block::MASTERCHAIN_ID;
+use tvm_block::Message;
+use tvm_block::MsgAddressInt;
+use tvm_block::OutAction;
+use tvm_block::OutActions;
+use tvm_block::RESERVE_ALL_BUT;
+use tvm_block::SENDMSG_ALL_BALANCE;
+use tvm_block::SENDMSG_DELETE_IF_EMPTY;
+use tvm_block::SENDMSG_EXCHANGE_ECC;
+use tvm_block::SENDMSG_IGNORE_ERROR;
+use tvm_block::SENDMSG_PAY_FEE_SEPARATELY;
+use tvm_block::SENDMSG_REMAINING_MSG_BALANCE;
+use tvm_block::SENDMSG_VALID_FLAGS;
+use tvm_block::Serializable;
+use tvm_block::StateInit;
+use tvm_block::StorageUsedShort;
+use tvm_block::TrActionPhase;
+use tvm_block::TrBouncePhase;
+use tvm_block::TrComputePhase;
+use tvm_block::TrComputePhaseVm;
+use tvm_block::TrCreditPhase;
+use tvm_block::TrStoragePhase;
+use tvm_block::Transaction;
+use tvm_block::VarUInteger32;
+use tvm_block::WorkchainFormat;
+use tvm_types::AccountId;
+use tvm_types::Cell;
+use tvm_types::ExceptionCode;
+use tvm_types::HashmapE;
+use tvm_types::HashmapType;
+use tvm_types::IBitstring;
+use tvm_types::Result;
+use tvm_types::SliceData;
+use tvm_types::UInt256;
+use tvm_types::error;
+use tvm_types::fail;
+use tvm_vm::error::TvmError;
+use tvm_vm::error::tvm_exception;
+use tvm_vm::executor::BehaviorModifiers;
+use tvm_vm::executor::MVConfig;
+use tvm_vm::executor::gas::gas_state::Gas;
+use tvm_vm::executor::token::ECC_SHELL_KEY;
+use tvm_vm::executor::token::INFINITY_CREDIT;
+use tvm_vm::smart_contract_info::SmartContractInfo;
+use tvm_vm::stack::Stack;
+
+use crate::blockchain_config::BlockchainConfig;
+use crate::blockchain_config::CalcMsgFwdFees;
+use crate::error::ExecutorError;
+use crate::vmsetup::VMSetup;
+use crate::vmsetup::VMSetupContext;
+
+const RESULT_CODE_ACTIONLIST_INVALID: i32 = 32;
+const RESULT_CODE_TOO_MANY_ACTIONS: i32 = 33;
+const RESULT_CODE_UNKNOWN_OR_INVALID_ACTION: i32 = 34;
+const RESULT_CODE_INCORRECT_SRC_ADDRESS: i32 = 35;
+const RESULT_CODE_INCORRECT_DST_ADDRESS: i32 = 36;
+const RESULT_CODE_NOT_ENOUGH_GRAMS: i32 = 37;
+const RESULT_CODE_NOT_ENOUGH_EXTRA: i32 = 38;
+const RESULT_CODE_INVALID_BALANCE: i32 = 40;
+const RESULT_CODE_BAD_ACCOUNT_STATE: i32 = 41;
+const RESULT_CODE_ANYCAST: i32 = 50;
+const RESULT_CODE_NOT_FOUND_LICENSE: i32 = 51;
+const RESULT_CODE_NOT_SPECIAL_CONTRACT: i32 = 52;
+const RESULT_CODE_OVERFLOW: i32 = 53;
+const RESULT_CODE_UNSUPPORTED: i32 = -1;
+
+const MAX_ACTIONS: usize = 255;
+
+const MAX_MSG_BITS: usize = 1 << 21;
+const MAX_MSG_CELLS: usize = 1 << 13;
+
+const STORAGE_FEE_COOLER_TIME: u32 = 2592000;
+
+#[derive(Eq, PartialEq, Debug)]
+pub enum IncorrectCheckRewrite {
+    Anycast,
+    Other,
+}
+
+pub struct ExecuteParams {
+    pub state_libs: HashmapE,
+    pub block_unixtime: u32,
+    pub block_lt: u64,
+    pub seq_no: u32,
+    pub last_tr_lt: Arc<AtomicU64>,
+    pub seed_block: UInt256,
+    pub debug: bool,
+    pub trace_callback: Option<Arc<tvm_vm::executor::TraceCallback>>,
+    pub behavior_modifiers: Option<BehaviorModifiers>,
+    pub block_version: u32,
+    #[cfg(feature = "signature_with_id")]
+    pub signature_id: i32,
+    pub vm_execution_is_block_related: Arc<Mutex<bool>>,
+    pub block_collation_was_finished: Arc<Mutex<bool>>,
+    pub dapp_id: Option<UInt256>,
+    pub available_credit: i128,
+    pub termination_deadline: Option<Instant>,
+    pub execution_timeout: Option<Duration>,
+    #[cfg(feature = "wasmtime")]
+    pub wasm_binary_root_path: String,
+    #[cfg(feature = "wasmtime")]
+    pub wasm_hash_whitelist: HashSet<[u8; 32]>,
+    #[cfg(feature = "wasmtime")]
+    pub wasm_engine: Option<wasmtime::Engine>,
+    #[cfg(feature = "wasmtime")]
+    pub wasm_component_cache: HashMap<[u8; 32], wasmtime::component::Component>,
+    pub mvconfig: MVConfig,
+    pub engine_version: semver::Version,
+    pub check_history_proof_hash: Option<Arc<dyn Send + Sync + Fn(u8, [u8; 32]) -> bool>>,
+}
+
+pub struct ActionPhaseResult {
+    pub phase: TrActionPhase,
+    pub messages: Vec<Message>,
+    pub copyleft_reward: Option<CopyleftReward>,
+}
+
+impl ActionPhaseResult {
+    fn new(
+        phase: TrActionPhase,
+        messages: Vec<Message>,
+        copyleft_reward: Option<CopyleftReward>,
+    ) -> ActionPhaseResult {
+        ActionPhaseResult { phase, messages, copyleft_reward }
+    }
+
+    fn from_phase(phase: TrActionPhase) -> ActionPhaseResult {
+        ActionPhaseResult::new(phase, vec![], None)
+    }
+}
+
+impl Default for ExecuteParams {
+    fn default() -> Self {
+        Self {
+            state_libs: HashmapE::with_bit_len(32),
+            block_unixtime: 0,
+            block_lt: 0,
+            seq_no: 0,
+            last_tr_lt: Arc::new(AtomicU64::new(0)),
+            seed_block: UInt256::default(),
+            debug: false,
+            trace_callback: None,
+            behavior_modifiers: None,
+            block_version: 0,
+            #[cfg(feature = "signature_with_id")]
+            signature_id: 0,
+            vm_execution_is_block_related: Arc::new(Mutex::new(false)),
+            block_collation_was_finished: Arc::new(Mutex::new(false)),
+            dapp_id: None,
+            available_credit: 0,
+            termination_deadline: None,
+            execution_timeout: None,
+            #[cfg(feature = "wasmtime")]
+            wasm_binary_root_path: "./config/wasm".to_owned(),
+            #[cfg(feature = "wasmtime")]
+            wasm_hash_whitelist: HashSet::new(),
+            #[cfg(feature = "wasmtime")]
+            wasm_engine: None,
+            #[cfg(feature = "wasmtime")]
+            wasm_component_cache: HashMap::new(),
+            mvconfig: MVConfig::default(),
+            engine_version: "1.0.0".parse().unwrap(),
+            check_history_proof_hash: None,
+        }
+    }
+}
+
+struct CellLimitGuard;
+
+impl CellLimitGuard {
+    fn new() -> Self {
+        tvm_types::DataCell::reset_unique_bloom();
+        tvm_types::DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = Some(800));
+        tvm_types::DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT
+            .with_borrow_mut(|x| *x = Some(1398101 * 1024));
+        Self
+    }
+}
+
+impl Drop for CellLimitGuard {
+    fn drop(&mut self) {
+        tvm_types::DataCell::reset_unique_bloom();
+        tvm_types::DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = None);
+        tvm_types::DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT
+            .with_borrow_mut(|x| *x = None);
+    }
+}
+
+pub trait TransactionExecutor {
+    fn execute_with_params(
+        &self,
+        in_msg: Option<&Message>,
+        account: &mut Account,
+        params: ExecuteParams,
+        minted_shell: &mut i128,
+    ) -> Result<Transaction>;
+
+    fn execute_with_libs_and_params(
+        &self,
+        in_msg: Option<&Message>,
+        account_root: &mut Cell,
+        params: ExecuteParams,
+    ) -> Result<(Transaction, i128)> {
+        let _cell_limit_guard = CellLimitGuard::new();
+        let old_hash = account_root.repr_hash();
+        let minted_shell: &mut i128 = &mut 0;
+        let mut account = Account::construct_from_cell(account_root.clone())?;
+        let is_previous_state_active =
+            !matches!(account.state(), Some(AccountState::AccountUninit) | None);
+        log::trace!(target: "executor", "previous_state {:?}, account {:?}, state {:?}, minted_shell {:?}", is_previous_state_active, account, account.state(), minted_shell);
+        let mut transaction =
+            self.execute_with_params(in_msg, &mut account, params, minted_shell)?;
+        if self.config().has_capability(GlobalCapabilities::CapFastStorageStat) {
+            account.update_storage_stat_fast()?;
+        } else {
+            account.update_storage_stat()?;
+        }
+        log::trace!(target: "executor", "acc state {:?}, previous_state {:?}, minted_shell {:?}", account.state(), is_previous_state_active, minted_shell);
+        *account_root = account.serialize()?;
+        let new_hash = account_root.repr_hash();
+        transaction.write_state_update(&HashUpdate::with_hashes(old_hash, new_hash))?;
+        // let cell = account
+        //     .clone()
+        //     .write_to_new_cell()?
+        //     .finalize(1024)
+        //     .map_err(|err| tvm_types::Error::from_boxed_compat(err.into()))?;
+        // for k in cell.depths() {
+        //     if k > 800 - 20 {
+        //         return Err(tvm_types::Error::from_boxed_compat(
+        //             anyhow::format_err!(
+        //                 "failed in the right place on cell depths {:?}",
+        //                 cell.depths()
+        //             )
+        //             .into(),
+        //         ));
+        //     }
+        // }
+        Ok((transaction, *minted_shell))
+    }
+
+    #[deprecated]
+    fn build_contract_info(
+        &self,
+        acc_balance: &CurrencyCollection,
+        acc_address: &MsgAddressInt,
+        unix_time: u32,
+        block_lt: u64,
+        trans_lt: u64,
+        seed_block: UInt256,
+    ) -> SmartContractInfo {
+        let config_params = self.config().raw_config().config_params.data().cloned();
+        let mut smci = SmartContractInfo {
+            capabilities: self.config().raw_config().capabilities(),
+            myself: SliceData::load_builder(acc_address.write_to_new_cell().unwrap_or_default())
+                .unwrap(),
+            block_lt,
+            trans_lt,
+            unix_time,
+            balance: acc_balance.clone(),
+            config_params,
+            ..Default::default()
+        };
+        smci.calc_rand_seed(seed_block, &acc_address.address().get_bytestring(0));
+        smci
+    }
+
+    fn ordinary_transaction(&self) -> bool;
+    fn config(&self) -> &BlockchainConfig;
+
+    fn build_stack(&self, in_msg: Option<&Message>, account: &Account) -> Stack;
+
+    /// Implementation of transaction's storage phase.
+    /// If account does not exist - phase skipped.
+    /// Calculates storage fees and substracts them from account balance.
+    /// If account balance becomes negative after that, then account is frozen.
+    fn storage_phase(
+        &self,
+        acc: &mut Account,
+        acc_balance: &mut CurrencyCollection,
+        tr: &mut Transaction,
+        is_masterchain: bool,
+        is_special: bool,
+        is_due: bool,
+    ) -> Result<TrStoragePhase> {
+        log::debug!(target: "executor", "storage_phase");
+        if tr.now() < acc.last_paid() {
+            fail!("transaction timestamp must be greater then account timestamp")
+        }
+
+        if is_special {
+            log::debug!(target: "executor", "Special account: AccStatusChange::Unchanged");
+            return Ok(TrStoragePhase::with_params(
+                Grams::zero(),
+                acc.due_payment().cloned(),
+                AccStatusChange::Unchanged,
+            ));
+        }
+        let mut fee = match acc.storage_info() {
+            Some(storage_info) => {
+                self.config().calc_storage_fee(storage_info, is_masterchain, tr.now())?
+            }
+            None => {
+                log::debug!(target: "executor", "Account::None");
+                return Ok(Default::default());
+            }
+        };
+        if let Some(due_payment) = acc.due_payment() {
+            fee.add(due_payment)?;
+            acc.set_due_payment(None);
+        }
+        if tr.now() < acc.last_paid() + STORAGE_FEE_COOLER_TIME && !is_due {
+            fee = Grams::zero();
+        }
+        if acc_balance.grams >= fee {
+            log::debug!(target: "executor", "acc_balance: {}, storage fee: {}", acc_balance.grams, fee);
+            acc_balance.grams.sub(&fee)?;
+            tr.add_fee_grams(&fee)?;
+            Ok(TrStoragePhase::with_params(fee, None, AccStatusChange::Unchanged))
+        } else {
+            log::debug!(target: "executor", "acc_balance: {} is storage fee from total: {}", acc_balance.grams, fee);
+            let storage_fees_collected = std::mem::take(&mut acc_balance.grams);
+            tr.add_fee_grams(&storage_fees_collected)?;
+            fee.sub(&storage_fees_collected)?;
+            let need_freeze =
+                fee > Grams::from(self.config().get_gas_config(is_masterchain).freeze_due_limit);
+            let need_delete = (acc.status() == AccountStatus::AccStateUninit
+                || acc.status() == AccountStatus::AccStateFrozen)
+                && fee > Grams::from(self.config().get_gas_config(is_masterchain).delete_due_limit);
+
+            if need_delete {
+                tr.total_fees_mut().add(acc_balance)?;
+                *acc = Account::default();
+                acc_balance.other = Default::default();
+                Ok(TrStoragePhase::with_params(
+                    storage_fees_collected,
+                    Some(fee),
+                    AccStatusChange::Deleted,
+                ))
+            } else if need_freeze {
+                acc.set_due_payment(Some(fee));
+                if acc.status() == AccountStatus::AccStateActive {
+                    acc.try_freeze()?;
+                    Ok(TrStoragePhase::with_params(
+                        storage_fees_collected,
+                        Some(fee),
+                        AccStatusChange::Frozen,
+                    ))
+                } else {
+                    Ok(TrStoragePhase::with_params(
+                        storage_fees_collected,
+                        Some(fee),
+                        AccStatusChange::Unchanged,
+                    ))
+                }
+            } else {
+                acc.set_due_payment(Some(fee));
+                Ok(TrStoragePhase::with_params(
+                    storage_fees_collected,
+                    Some(fee),
+                    AccStatusChange::Unchanged,
+                ))
+            }
+        }
+    }
+
+    /// Implementation of transaction's credit phase.
+    /// Increases account balance by the amount that appears in the internal
+    /// message header. If account does not exist - phase skipped.
+    /// If message is not internal - phase skipped.
+    fn credit_phase(
+        &self,
+        acc: &mut Account,
+        tr: &mut Transaction,
+        msg_balance: &mut CurrencyCollection,
+        acc_balance: &mut CurrencyCollection,
+    ) -> Result<TrCreditPhase> {
+        let collected = if let Some(due_payment) = acc.due_payment() {
+            let collected = *min(due_payment, &msg_balance.grams);
+            msg_balance.grams.sub(&collected)?;
+            let mut due_payment_remaining = *due_payment;
+            due_payment_remaining.sub(&collected)?;
+            acc.set_due_payment(if due_payment_remaining.is_zero() {
+                None
+            } else {
+                Some(due_payment_remaining)
+            });
+            tr.total_fees_mut().grams.add(&collected)?;
+            if collected.is_zero() { None } else { Some(collected) }
+        } else {
+            None
+        };
+        log::debug!(
+            target: "executor",
+            "credit_phase: add funds {} to {}",
+            msg_balance.grams, acc_balance.grams
+        );
+        acc_balance.add(msg_balance)?;
+        Ok(TrCreditPhase::with_params(collected, msg_balance.clone()))
+        // TODO: Is it need to credit with ihr_fee value in internal messages?
+    }
+
+    /// Implementation of transaction's computing phase.
+    /// Evaluates new accout state and invokes TVM if account has contract code.
+    fn compute_phase(
+        &self,
+        msg: Option<&mut Message>,
+        acc: &mut Account,
+        acc_balance: &mut CurrencyCollection,
+        msg_balance: &mut CurrencyCollection,
+        mut smc_info: SmartContractInfo,
+        stack: Stack,
+        storage_fee: u128,
+        is_masterchain: bool,
+        is_special: bool,
+        params: &ExecuteParams,
+    ) -> Result<(TrComputePhase, Option<Cell>, Option<Cell>)> {
+        let mut result_acc = acc.clone();
+        let mut vm_phase = TrComputePhaseVm::default();
+        let init_code_hash = self.config().has_capability(GlobalCapabilities::CapInitCodeHash);
+        let libs_disabled = !self.config().has_capability(GlobalCapabilities::CapSetLibCode);
+        let is_external = if let Some(ref msg) = msg {
+            if let Some(header) = msg.int_header() {
+                log::debug!(target: "executor", "msg internal, bounce: {}", header.bounce);
+                if result_acc.is_none() {
+                    if let Some(new_acc) =
+                        account_from_message(msg, msg_balance, true, init_code_hash, libs_disabled)
+                    {
+                        result_acc = new_acc;
+                        result_acc.set_last_paid(if !is_special {
+                            smc_info.unix_time()
+                        } else {
+                            0
+                        });
+
+                        // if there was a balance in message (not bounce), then account state at
+                        // least become uninit
+                        result_acc.uninit_account();
+                        *acc = result_acc.clone();
+                    }
+                }
+                false
+            } else {
+                log::debug!(target: "executor", "msg external");
+                true
+            }
+        } else {
+            debug_assert!(!result_acc.is_none());
+            false
+        };
+        log::debug!(target: "executor", "acc balance: {}", acc_balance);
+        log::debug!(target: "executor", "msg balance: {}", msg_balance);
+        let is_ordinary = self.ordinary_transaction();
+        if acc_balance.grams.is_zero() {
+            log::debug!(target: "executor", "skip computing phase no gas");
+            return Ok((TrComputePhase::skipped(ComputeSkipReason::NoGas), None, None));
+        }
+        let gas_config = self.config().get_gas_config(is_masterchain);
+        let gas = init_gas(
+            acc_balance.grams.as_u128(),
+            msg_balance.grams.as_u128(),
+            is_external,
+            is_special,
+            is_ordinary,
+            gas_config,
+        );
+        if gas.get_gas_limit() == 0 && gas.get_gas_credit() == 0 {
+            log::debug!(target: "executor", "skip computing phase no gas");
+            return Ok((TrComputePhase::skipped(ComputeSkipReason::NoGas), None, None));
+        }
+
+        let mut libs = vec![];
+        if let Some(msg) = msg {
+            if let Some(state_init) = msg.state_init() {
+                libs.push(state_init.libraries().inner());
+            }
+            let compute_result =
+                compute_new_state(&mut result_acc, acc_balance, msg, self.config());
+            if let Some(reason) = compute_result? {
+                if let CommonMsgInfo::IntMsgInfo(ref mut header) = msg.header_mut() {
+                    if !header.bounce && reason == ComputeSkipReason::BadState {
+                        if msg_balance.grams > acc_balance.grams {
+                            acc_balance.grams = Grams::zero();
+                        } else {
+                            acc_balance.grams -= msg_balance.grams;
+                        }
+                        msg_balance.grams = Grams::zero();
+                        header.value_mut().set_grams(0)?;
+                    }
+                }
+                if !init_code_hash {
+                    *acc = result_acc;
+                }
+                return Ok((TrComputePhase::skipped(reason), None, None));
+            }
+        };
+
+        vm_phase.gas_credit = match gas.get_gas_credit() as u32 {
+            0 => None,
+            value => Some(value.try_into()?),
+        };
+        vm_phase.gas_limit = (gas.get_gas_limit() as u64).try_into()?;
+
+        if result_acc.get_code().is_none() {
+            vm_phase.exit_code = -13;
+            if is_external {
+                fail!(ExecutorError::NoAcceptError(vm_phase.exit_code, None))
+            } else {
+                vm_phase.exit_arg = None;
+                vm_phase.success = false;
+                vm_phase.gas_fees =
+                    Grams::new(if is_special { 0 } else { gas_config.calc_gas_fee(0) })?;
+
+                if !acc_balance.grams.sub(&vm_phase.gas_fees)? {
+                    log::debug!(target: "executor", "can't sub funds: {} from acc_balance: {}", vm_phase.gas_fees, acc_balance.grams);
+                    fail!("can't sub funds: from acc_balance")
+                }
+                *acc = result_acc;
+                return Ok((TrComputePhase::Vm(vm_phase), None, None));
+            }
+        }
+        let code = result_acc.get_code().unwrap_or_default();
+        let data = result_acc.get_data().unwrap_or_default();
+        libs.push(result_acc.libraries().inner());
+        libs.push(params.state_libs.clone());
+
+        smc_info.set_mycode(code.clone());
+        smc_info.set_storage_fee(storage_fee);
+        if let Some(init_code_hash) = result_acc.init_code_hash() {
+            smc_info.set_init_code_hash(init_code_hash.clone());
+        }
+        let mut vm_setup = VMSetup::with_context(
+            SliceData::load_cell(code)?,
+            VMSetupContext {
+                capabilities: self.config().capabilites(),
+                block_version: params.block_version,
+                #[cfg(feature = "signature_with_id")]
+                signature_id: params.signature_id,
+            },
+        )
+        .set_smart_contract_info(smc_info)?
+        .set_stack(stack)
+        .set_data(data)?
+        .set_libraries(libs)
+        .set_gas(gas)
+        .set_debug(params.debug)
+        .set_termination_deadline(params.termination_deadline)
+        .set_execution_timeout(params.execution_timeout)
+        .set_block_related_flags(
+            params.vm_execution_is_block_related.clone(),
+            params.block_collation_was_finished.clone(),
+        );
+
+        #[cfg(feature = "wasmtime")]
+        {
+            vm_setup = vm_setup.set_wasm_root_path(params.wasm_binary_root_path.clone())
+        }
+
+        vm_setup = vm_setup
+            .set_engine_available_credit(params.available_credit)
+            .set_engine_version(params.engine_version.clone())
+            .set_engine_mv_config(params.mvconfig.clone());
+
+        #[cfg(feature = "wasmtime")]
+        #[allow(clippy::unnecessary_operation)]
+        {
+            vm_setup = vm_setup
+                .set_wasm_hash_whitelist(params.wasm_hash_whitelist.clone())
+                .set_wasm_block_time(params.block_unixtime.into())
+                .extern_insert_wasm_engine(params.wasm_engine.clone())
+                .extern_insert_wasm_component_cache(params.wasm_component_cache.clone())
+        };
+
+        vm_setup = vm_setup.set_dapp_id(params.dapp_id.clone());
+        vm_setup = vm_setup.set_check_history_proof_hash(params.check_history_proof_hash.clone());
+
+        let mut vm = vm_setup.create();
+
+        if let Some(modifiers) = params.behavior_modifiers.clone() {
+            vm.modify_behavior(modifiers);
+        }
+
+        // TODO: set vm_init_state_hash
+
+        if let Some(trace_callback) = params.trace_callback.clone() {
+            vm.set_trace_callback(move |engine, info| trace_callback(engine, info));
+        }
+
+        let result = vm.execute();
+        log::trace!(target: "executor", "execute result: {:?}", result);
+        let mut raw_exit_arg = None;
+        match result {
+            Err(err) => {
+                log::debug!(target: "executor", "VM terminated with exception: {}", err);
+                if let Some(TvmError::TerminationDeadlineReached) = err.downcast_ref() {
+                    fail!(ExecutorError::TerminationDeadlineReached);
+                }
+                let exception = tvm_exception(err)?;
+                vm_phase.exit_code = if let Some(code) = exception.custom_code() {
+                    code
+                } else {
+                    match exception.exception_code() {
+                        Some(ExceptionCode::OutOfGas) => !(ExceptionCode::OutOfGas as i32), /* correct error code according cpp code */
+                        Some(error_code) => error_code as i32,
+                        None => ExceptionCode::UnknownError as i32,
+                    }
+                };
+                vm_phase.exit_arg = match exception
+                    .value
+                    .as_integer()
+                    .and_then(|value| value.into(i32::MIN..=i32::MAX))
+                {
+                    Err(_) | Ok(0) => None,
+                    Ok(exit_arg) => Some(exit_arg),
+                };
+                raw_exit_arg = Some(exception.value);
+            }
+            Ok(exit_code) => vm_phase.exit_code = exit_code,
+        };
+        vm_phase.success = vm.get_committed_state().is_committed();
+        log::debug!(target: "executor", "VM terminated with exit code {}", vm_phase.exit_code);
+
+        // calc gas fees
+        let gas = vm.get_gas();
+        let credit = gas.get_gas_credit() as u32;
+        // for external messages gas will not be exacted if VM throws the exception and
+        // gas_credit != 0
+        let used = gas.get_gas_used() as u64;
+        vm_phase.gas_used = used.try_into()?;
+        if credit != 0 {
+            if is_external {
+                fail!(ExecutorError::NoAcceptError(vm_phase.exit_code, raw_exit_arg))
+            }
+            vm_phase.gas_fees = Grams::zero();
+        } else {
+            // credit == 0 means contract accepted
+            let gas_fees = if is_special { 0 } else { gas_config.calc_gas_fee(used) };
+            vm_phase.gas_fees = gas_fees.try_into()?;
+        };
+
+        log::debug!(
+            target: "executor",
+            "gas after: gl: {}, gc: {}, gu: {}, fees: {}",
+            gas.get_gas_limit() as u64, credit, used, vm_phase.gas_fees
+        );
+
+        // set mode
+        vm_phase.mode = 0;
+        vm_phase.vm_steps = vm.steps();
+        // TODO: vm_final_state_hash
+        log::debug!(target: "executor", "acc_balance: {}, gas fees: {}", acc_balance.grams, vm_phase.gas_fees);
+        if !acc_balance.grams.sub(&vm_phase.gas_fees)? {
+            log::error!(target: "executor", "This situation is unreachable: can't sub funds: {} from acc_balance: {}", vm_phase.gas_fees, acc_balance.grams);
+            fail!("can't sub funds: from acc_balance")
+        }
+
+        let new_data = if let Ok(cell) = vm.get_committed_state().get_root().as_cell() {
+            Some(cell.clone())
+        } else {
+            log::debug!(target: "executor", "invalid contract, it must be cell in c4 register");
+            vm_phase.success = false;
+            None
+        };
+
+        let out_actions = if let Ok(root_cell) = vm.get_committed_state().get_actions().as_cell() {
+            Some(root_cell.clone())
+        } else {
+            log::debug!(target: "executor", "invalid contract, it must be cell in c5 register");
+            vm_phase.success = false;
+            None
+        };
+
+        *acc = result_acc;
+        Ok((TrComputePhase::Vm(vm_phase), out_actions, new_data))
+    }
+
+    /// Implementation of transaction's action phase.
+    /// If computing phase is successful then action phase is started.
+    /// If TVM invoked in computing phase returned some output actions,
+    /// then they will be added to transaction's output message list.
+    /// Total value from all outbound internal messages will be collected and
+    /// substracted from account balance. If account has enough funds this
+    /// will be succeded, otherwise action phase is failed, transaction will be
+    /// marked as aborted, account changes will be rollbacked.
+    #[deprecated]
+    fn action_phase(
+        &self,
+        tr: &mut Transaction,
+        acc: &mut Account,
+        original_acc_balance: &CurrencyCollection,
+        acc_balance: &mut CurrencyCollection,
+        msg_remaining_balance: &mut CurrencyCollection,
+        compute_phase_fees: &Grams,
+        actions_cell: Cell,
+        new_data: Option<Cell>,
+        my_addr: &MsgAddressInt,
+        is_special: bool,
+        available_credit: i128,
+        minted_shell: &mut i128,
+        need_to_burn: Grams,
+    ) -> Result<(TrActionPhase, Vec<Message>)> {
+        let result = self.action_phase_with_copyleft(
+            tr,
+            acc,
+            original_acc_balance,
+            acc_balance,
+            msg_remaining_balance,
+            compute_phase_fees,
+            actions_cell,
+            new_data,
+            my_addr,
+            is_special,
+            available_credit,
+            minted_shell,
+            need_to_burn,
+            None,
+        )?;
+        Ok((result.phase, result.messages))
+    }
+
+    fn action_phase_with_copyleft(
+        &self,
+        tr: &mut Transaction,
+        acc: &mut Account,
+        original_acc_balance: &CurrencyCollection,
+        acc_balance: &mut CurrencyCollection,
+        msg_remaining_balance: &mut CurrencyCollection,
+        compute_phase_fees: &Grams,
+        actions_cell: Cell,
+        new_data: Option<Cell>,
+        my_addr: &MsgAddressInt,
+        is_special: bool,
+        available_credit: i128,
+        minted_shell: &mut i128,
+        need_to_burn: Grams,
+        message_src_dapp_id: Option<UInt256>,
+    ) -> Result<ActionPhaseResult> {
+        let mut need_to_reserve = need_to_burn.as_u64_quiet();
+        let mut out_msgs = vec![];
+        let mut acc_copy = acc.clone();
+        let mut acc_remaining_balance = acc_balance.clone();
+        let mut phase = TrActionPhase::default();
+        let mut total_reserved_value = CurrencyCollection::default();
+        phase.action_list_hash = actions_cell.repr_hash();
+        let mut actions = match OutActions::construct_from_cell(actions_cell) {
+            Err(err) => {
+                log::debug!(
+                    target: "executor",
+                    "cannot parse action list: format is invalid, err: {}",
+                    err
+                );
+                // Here you can select only one of 2 error codes:
+                // RESULT_CODE_UNKNOWN_OR_INVALID_ACTION or RESULT_CODE_ACTIONLIST_INVALID
+                phase.result_code = RESULT_CODE_UNKNOWN_OR_INVALID_ACTION;
+                return Ok(ActionPhaseResult::from_phase(phase));
+            }
+            Ok(actions) => actions,
+        };
+
+        if actions.len() > MAX_ACTIONS {
+            log::debug!(target: "executor", "too many actions: {}", actions.len());
+            phase.result_code = RESULT_CODE_TOO_MANY_ACTIONS;
+            return Ok(ActionPhaseResult::from_phase(phase));
+        }
+        phase.tot_actions = actions.len() as i16;
+        log::debug!(target: "executor", "\nActions {:#?}",
+                actions
+        );
+
+        let process_err_code =
+            |mut err_code: i32, i: usize, phase: &mut TrActionPhase| -> Result<bool> {
+                if err_code == -1 {
+                    err_code = RESULT_CODE_UNKNOWN_OR_INVALID_ACTION;
+                }
+                if err_code != 0 {
+                    log::debug!(target: "executor", "action failed: error_code={}", err_code);
+                    phase.valid = true;
+                    phase.result_code = err_code;
+                    if i != 0 {
+                        phase.result_arg = Some(i as i32);
+                    }
+                    if err_code == RESULT_CODE_NOT_ENOUGH_GRAMS
+                        || err_code == RESULT_CODE_NOT_ENOUGH_EXTRA
+                    {
+                        phase.no_funds = true;
+                    }
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            };
+
+        let mut account_deleted = false;
+
+        let mut out_msgs0 = vec![];
+        let copyleft_reward =
+            self.copyleft_action_handler(compute_phase_fees, &mut phase, &actions)?;
+        if phase.result_code != 0 {
+            return Ok(ActionPhaseResult::from_phase(phase));
+        }
+
+        // The ChangeLibrary action can be created by VM in two ways:
+        // 1) by the SETLIBCODE and CHANGELIB insns,
+        // 2) manually by modifying the c5 register.
+        //
+        // In the case of CapSetLibCode is not set, (1) is denied by VM but (2) is still
+        // available. To deny (2) too, CapSetLibCode needs to be checked here in
+        // executor. However, since the executor's behavior gets modified, an
+        // additional capability must be checked beforehand.
+        let is_change_library_denied = self.config().has_capability(GlobalCapabilities::CapTvmV19)
+            && !self.config().has_capability(GlobalCapabilities::CapSetLibCode);
+
+        for (i, action) in actions.iter_mut().enumerate() {
+            log::debug!(target: "executor", "\nAction #{}\nType: {}\nInitial balance: {}, need_to_burn {}",
+                i,
+                action_type(action),
+                balance_to_string(&acc_remaining_balance),
+                need_to_burn
+            );
+            let mut init_balance = acc_remaining_balance.clone();
+            let err_code = match std::mem::replace(action, OutAction::None) {
+                OutAction::SendMsg { mode, mut out_msg } => {
+                    if (mode & SENDMSG_ALL_BALANCE) != 0 {
+                        out_msgs0.push((i, mode, out_msg));
+                        log::debug!(target: "executor", "Message with flag `SEND_ALL_BALANCE` it will be sent last. Skip it for now.");
+                        continue;
+                    }
+                    let result = outmsg_action_handler(
+                        &mut phase,
+                        mode,
+                        &mut out_msg,
+                        &mut acc_remaining_balance,
+                        msg_remaining_balance,
+                        //                        compute_phase_fees,
+                        self.config(),
+                        is_special,
+                        my_addr,
+                        &total_reserved_value,
+                        &mut account_deleted,
+                    );
+                    match result {
+                        Ok(_) => {
+                            phase.msgs_created += 1;
+                            out_msgs0.push((i, mode, out_msg));
+                            0
+                        }
+                        Err(code) => code,
+                    }
+                }
+                OutAction::ReserveCurrency { mode, mut value } => {
+                    log::debug!(target: "executor", "RESERVE: mode {:?}, value {:?}, acc_remaining {:?}, original_acc_balance {:?}, need_to_reserve {:?}", mode, value, acc_remaining_balance, original_acc_balance, need_to_reserve);
+                    match reserve_action_handler(
+                        mode,
+                        &mut value,
+                        &mut acc_remaining_balance,
+                        &mut need_to_reserve,
+                    ) {
+                        Ok(reserved_value) => {
+                            phase.spec_actions += 1;
+                            match total_reserved_value.add(&reserved_value) {
+                                Ok(_) => 0,
+                                Err(_) => RESULT_CODE_INVALID_BALANCE,
+                            }
+                        }
+                        Err(code) => code,
+                    }
+                }
+                OutAction::SetCode { new_code: code } => {
+                    match setcode_action_handler(&mut acc_copy, code) {
+                        None => {
+                            phase.spec_actions += 1;
+                            0
+                        }
+                        Some(code) => code,
+                    }
+                }
+                OutAction::ChangeLibrary { .. } if is_change_library_denied => {
+                    RESULT_CODE_UNKNOWN_OR_INVALID_ACTION
+                }
+                OutAction::ChangeLibrary { mode, code, hash } => {
+                    match change_library_action_handler(&mut acc_copy, mode, code, hash) {
+                        None => {
+                            phase.spec_actions += 1;
+                            0
+                        }
+                        Some(code) => code,
+                    }
+                }
+                OutAction::CopyLeft { .. } => 0,
+                OutAction::MintToken { value } => {
+                    let mut add_value = CurrencyCollection::new();
+                    if is_special {
+                        add_value.other = value;
+                        match acc_remaining_balance.add(&add_value) {
+                            Ok(_) => {
+                                phase.spec_actions += 1;
+                                0
+                            }
+                            Err(_) => RESULT_CODE_UNSUPPORTED,
+                        }
+                    } else {
+                        RESULT_CODE_NOT_SPECIAL_CONTRACT
+                    }
+                }
+                OutAction::BurnToken { value, key } => {
+                    let mut sub_value = CurrencyCollection::new();
+                    if value == 0 {
+                        let other = acc_remaining_balance.get_other(key)?;
+                        if let Some(acc_value) = other {
+                            sub_value.other.set(&key, &acc_value)?;
+                        }
+                    } else {
+                        sub_value
+                            .other
+                            .set(&key, &VarUInteger32::from_two_u128(0, value as u128)?)?;
+                    }
+                    match acc_remaining_balance.sub(&sub_value) {
+                        Ok(true) => {
+                            phase.spec_actions += 1;
+                            0
+                        }
+                        Ok(false) | Err(_) => RESULT_CODE_NOT_ENOUGH_EXTRA,
+                    }
+                }
+                OutAction::ExchangeShell { value } => {
+                    let mut sub_value = CurrencyCollection::new();
+                    let mut exchange_value = 0;
+                    if let Some(a) = acc_remaining_balance.other.get(&ECC_SHELL_KEY)? {
+                        if a <= VarUInteger32::from(value as u128) {
+                            sub_value.other.set(&ECC_SHELL_KEY, &a)?;
+                            let digits = a.value().to_u64_digits();
+                            if !digits.1.is_empty() {
+                                exchange_value = digits.1[0];
+                            }
+                        } else {
+                            sub_value.set_other(ECC_SHELL_KEY, value as u128)?;
+                            exchange_value = value;
+                        }
+                    }
+                    match acc_remaining_balance.grams.add(&Grams::from(exchange_value)) {
+                        Ok(true) => {
+                            acc_remaining_balance.sub(&sub_value)?;
+                            phase.spec_actions += 1;
+                            0
+                        }
+                        Ok(false) => {
+                            phase.spec_actions += 1;
+                            0
+                        }
+                        Err(_) => {
+                            phase.spec_actions += 1;
+                            0
+                        }
+                    }
+                }
+                OutAction::MintShellToken { value } => {
+                    if available_credit != INFINITY_CREDIT
+                        && value as i128 + *minted_shell > available_credit
+                    {
+                        RESULT_CODE_NOT_ENOUGH_GRAMS
+                    } else {
+                        match acc_remaining_balance.grams.add(&(Grams::from(value))) {
+                            Ok(true) => {
+                                *minted_shell += value as i128;
+                                phase.spec_actions += 1;
+                                0
+                            }
+                            Ok(false) => RESULT_CODE_OVERFLOW,
+                            Err(_) => RESULT_CODE_UNSUPPORTED,
+                        }
+                    }
+                }
+                OutAction::MintShellQToken { mut value } => {
+                    if available_credit != INFINITY_CREDIT
+                        && value as i128 + *minted_shell > available_credit
+                    {
+                        if *minted_shell >= available_credit {
+                            value = 0;
+                        } else {
+                            let new_value = available_credit - *minted_shell;
+                            value = new_value.try_into()?;
+                        }
+                    }
+                    match acc_remaining_balance.grams.add(&(Grams::from(value))) {
+                        Ok(true) => {
+                            *minted_shell += value as i128;
+                            phase.spec_actions += 1;
+                            0
+                        }
+                        Ok(false) => RESULT_CODE_OVERFLOW,
+                        Err(_) => RESULT_CODE_UNSUPPORTED,
+                    }
+                }
+                OutAction::SendToDappConfigToken { value } => {
+                    let value_gram = Grams::from(value);
+                    if value_gram > acc_remaining_balance.grams {
+                        RESULT_CODE_NOT_ENOUGH_GRAMS
+                    } else {
+                        match acc_remaining_balance.grams.sub(&value_gram) {
+                            Ok(true) => {
+                                *minted_shell -= value as i128;
+                                phase.spec_actions += 1;
+                                0
+                            }
+                            Ok(false) => RESULT_CODE_OVERFLOW,
+                            Err(_) => RESULT_CODE_UNSUPPORTED,
+                        }
+                    }
+                }
+                OutAction::None => RESULT_CODE_UNKNOWN_OR_INVALID_ACTION,
+            };
+            init_balance.sub(&acc_remaining_balance)?;
+            log::debug!(target: "executor", "Final balance:   {}\nDelta:           {}",
+                balance_to_string(&acc_remaining_balance),
+                balance_to_string(&init_balance)
+            );
+            if process_err_code(err_code, i, &mut phase)? {
+                return Ok(ActionPhaseResult::new(phase, vec![], copyleft_reward));
+            }
+        }
+        if acc_remaining_balance.grams < Grams::from(need_to_reserve) {
+            let err_code = RESULT_CODE_NOT_ENOUGH_GRAMS;
+            if process_err_code(err_code, 0, &mut phase)? {
+                return Ok(ActionPhaseResult::new(phase, vec![], copyleft_reward));
+            }
+        }
+        for (i, mode, mut out_msg) in out_msgs0.into_iter() {
+            if let Some(header) = out_msg.int_header_mut() {
+                header.set_src_dapp_id(message_src_dapp_id.clone());
+            }
+            if let Some(header) = out_msg.ext_out_header_v2_mut() {
+                header.set_src_dapp_id(message_src_dapp_id.clone());
+            }
+            if (mode & SENDMSG_ALL_BALANCE) == 0 {
+                out_msgs.push(out_msg);
+                continue;
+            }
+            let mut free_to_send = acc_remaining_balance.clone();
+            if acc_remaining_balance.grams > Grams::from(need_to_reserve) {
+                if need_to_reserve != 0 {
+                    free_to_send.grams.sub(&Grams::from(need_to_reserve))?;
+                }
+                log::debug!(target: "executor", "\nSend message with all balance:\nInitial balance: {}",
+                    balance_to_string(&acc_remaining_balance));
+                let result = outmsg_action_handler(
+                    &mut phase,
+                    mode,
+                    &mut out_msg,
+                    &mut free_to_send,
+                    msg_remaining_balance,
+                    //                    compute_phase_fees,
+                    self.config(),
+                    is_special,
+                    my_addr,
+                    &total_reserved_value,
+                    &mut account_deleted,
+                );
+                if need_to_reserve != 0 {
+                    free_to_send.grams.add(&Grams::from(need_to_reserve))?;
+                }
+                acc_remaining_balance = free_to_send.clone();
+                log::debug!(target: "executor", "Final balance:   {}", balance_to_string(&acc_remaining_balance));
+                let err_code = match result {
+                    Ok(_) => {
+                        phase.msgs_created += 1;
+                        out_msgs.push(out_msg);
+                        0
+                    }
+                    Err(code) => code,
+                };
+                if process_err_code(err_code, i, &mut phase)? {
+                    return Ok(ActionPhaseResult::new(phase, vec![], copyleft_reward));
+                }
+            } else {
+                if process_err_code(RESULT_CODE_NOT_ENOUGH_GRAMS, i, &mut phase)? {
+                    return Ok(ActionPhaseResult::new(phase, vec![], copyleft_reward));
+                }
+            }
+        }
+
+        // calc new account balance
+        log::debug!(target: "executor", "\nReturn reserved balance:\nInitial:  {}\nReserved: {}",
+            balance_to_string(&acc_remaining_balance),
+            balance_to_string(&total_reserved_value)
+        );
+        if let Err(err) = acc_remaining_balance.add(&total_reserved_value) {
+            log::debug!(target: "executor", "failed to add account balance with reserved value {}", err);
+            fail!("failed to add account balance with reserved value {}", err)
+        }
+
+        log::debug!(target: "executor", "Final:    {}", balance_to_string(&acc_remaining_balance));
+
+        let fee = phase.total_action_fees();
+        log::debug!(target: "executor", "Total action fees: {}", fee);
+        tr.add_fee_grams(&fee)?;
+
+        if account_deleted {
+            log::debug!(target: "executor", "\nAccount deleted");
+            phase.status_change = AccStatusChange::Deleted;
+        }
+        log::debug!(target: "executor", "Balance and need_to_burn {}, {}", acc_remaining_balance, need_to_burn);
+        if acc_remaining_balance.grams >= need_to_burn {
+            acc_remaining_balance.grams -= need_to_burn;
+        } else {
+            acc_remaining_balance.grams = Grams::zero();
+            if process_err_code(RESULT_CODE_NOT_ENOUGH_GRAMS, 0, &mut phase)? {
+                return Ok(ActionPhaseResult::new(phase, vec![], copyleft_reward));
+            }
+        }
+        phase.valid = true;
+        phase.success = true;
+        *acc_balance = acc_remaining_balance;
+        *acc = acc_copy;
+        if let Some(new_data) = new_data {
+            acc.set_data(new_data);
+        }
+        Ok(ActionPhaseResult::new(phase, out_msgs, copyleft_reward))
+    }
+
+    /// Implementation of transaction's bounce phase.
+    /// Bounce phase occurs only if transaction 'aborted' flag is set and
+    /// if inbound message is internal message with field 'bounce=true'.
+    /// Generates outbound internal message for original message sender, with
+    /// value equal to value of original message minus gas payments and
+    /// forwarding fees and empty body. Generated message is added to
+    /// transaction's output message list.
+    fn bounce_phase(
+        &self,
+        mut remaining_msg_balance: CurrencyCollection,
+        acc_balance: &mut CurrencyCollection,
+        compute_phase_fees: &Grams,
+        msg: &Message,
+        tr: &mut Transaction,
+        my_addr: &MsgAddressInt,
+    ) -> Result<(TrBouncePhase, Option<Message>)> {
+        let header = msg.int_header().ok_or_else(|| error!("Not found msg internal header"))?;
+        if !header.bounce {
+            fail!("Bounce flag not set")
+        }
+        // create bounced message and swap src and dst addresses
+        let mut header = header.clone();
+        header.set_exchange(false);
+        let msg_src =
+            header.src_ref().ok_or_else(|| error!("Not found src in message header"))?.clone();
+        let msg_dst = std::mem::replace(&mut header.dst, msg_src);
+        header.set_src(msg_dst);
+        match check_rewrite_dest_addr(&header.dst, self.config(), my_addr) {
+            Ok(new_dst) => header.dst = new_dst,
+            Err(_) => {
+                log::warn!(target: "executor", "Incorrect destination address in a bounced message {}", header.dst);
+                fail!("Incorrect destination address in a bounced message {}", header.dst)
+            }
+        }
+
+        let is_masterchain = msg.is_masterchain();
+
+        // create header for new bounced message and swap src and dst addresses
+        header.ihr_disabled = true;
+        header.bounce = false;
+        header.bounced = true;
+        header.ihr_fee = Grams::zero();
+
+        let mut bounce_msg = Message::with_int_header(header);
+        if self.config().has_capability(GlobalCapabilities::CapBounceMsgBody) {
+            let mut builder = (-1i32).write_to_new_cell()?;
+            if let Some(body) = msg.body() {
+                let mut body_copy = body.clone();
+                body_copy.shrink_data(0..256);
+                builder.append_bytestring(&body_copy)?;
+                if self.config().has_capability(GlobalCapabilities::CapFullBodyInBounced) {
+                    builder.checked_append_reference(body.into_cell())?;
+                }
+            }
+            bounce_msg.set_body(SliceData::load_builder(builder)?);
+            if self.config().has_capability(GlobalCapabilities::CapFullBodyInBounced) {
+                if let Some(init) = msg.state_init() {
+                    bounce_msg.set_state_init(init.clone());
+                }
+            }
+        }
+
+        // calculated storage for bounced message is empty
+        let (storage, fwd_full_fees) = {
+            let fwd_full_fees = self.config().calc_fwd_fee(is_masterchain, &Cell::default())?;
+            (StorageUsedShort::with_values_checked(0, 0)?, fwd_full_fees)
+        };
+        let fwd_prices = self.config().get_fwd_prices(is_masterchain);
+        let fwd_mine_fees = fwd_prices.mine_fee_checked(&fwd_full_fees)?;
+        let fwd_fees = if fwd_mine_fees.as_u128() > fwd_full_fees.as_u128() {
+            Grams::zero()
+        } else {
+            Grams::new(fwd_full_fees.as_u128() - fwd_mine_fees.as_u128())?
+        };
+
+        log::debug!(target: "executor", "get fee {} from bounce msg {}", fwd_full_fees, remaining_msg_balance);
+
+        if remaining_msg_balance.grams < fwd_full_fees + *compute_phase_fees {
+            log::debug!(
+                target: "executor", "bounce phase - not enough grams {} to get fwd fee {}",
+                remaining_msg_balance, fwd_full_fees
+            );
+            return Ok((TrBouncePhase::no_funds(storage, fwd_full_fees), None));
+        }
+
+        acc_balance.sub(&remaining_msg_balance)?;
+        remaining_msg_balance.grams.sub(&fwd_full_fees)?;
+        remaining_msg_balance.grams.sub(compute_phase_fees)?;
+        match bounce_msg.header_mut() {
+            CommonMsgInfo::IntMsgInfo(header) => {
+                header.value = remaining_msg_balance.clone();
+                header.fwd_fee = fwd_fees;
+            }
+            _ => fail!("Error during getting message header"),
+        }
+
+        log::debug!(
+            target: "executor",
+            "bounce fees: {} bounce value: {}",
+            fwd_mine_fees, bounce_msg.get_value().unwrap()
+        );
+        tr.add_fee_grams(&fwd_mine_fees)?;
+        Ok((TrBouncePhase::ok(storage, fwd_mine_fees, fwd_fees), Some(bounce_msg)))
+    }
+
+    fn copyleft_action_handler(
+        &self,
+        compute_phase_fees: &Grams,
+        phase: &mut TrActionPhase,
+        actions: &LinkedList<OutAction>,
+    ) -> Result<Option<CopyleftReward>> {
+        let mut copyleft_reward = Grams::zero();
+        let mut copyleft_address = AccountId::default();
+        let mut was_copyleft_instruction = false;
+
+        for (i, action) in actions.iter().enumerate() {
+            if let OutAction::CopyLeft { license, address } = action {
+                if was_copyleft_instruction {
+                    fail!("Duplicated copyleft action")
+                }
+                let copyleft_config = self.config().raw_config().copyleft_config()?;
+                phase.spec_actions += 1;
+                if let Some(copyleft_percent) = copyleft_config.license_rates.get(license)? {
+                    if copyleft_percent >= 100 {
+                        fail!(
+                            "copyleft percent on license {} is too big {}",
+                            license,
+                            copyleft_percent
+                        )
+                    }
+                    log::debug!(
+                        target: "executor",
+                        "Found copyleft action: license: {}, address: {}",
+                        license, address
+                    );
+                    copyleft_reward = (*compute_phase_fees * copyleft_percent as u128) / 100;
+                    copyleft_address = address.clone();
+                    was_copyleft_instruction = true;
+                } else {
+                    log::debug!(target: "executor", "Not found license {} in config", license);
+                    phase.result_code = RESULT_CODE_NOT_FOUND_LICENSE;
+                    phase.result_arg = Some(i as i32);
+                    return Ok(None);
+                }
+            }
+        }
+
+        if was_copyleft_instruction && !copyleft_reward.is_zero() {
+            Ok(Some(CopyleftReward { reward: copyleft_reward, address: copyleft_address }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn add_messages(
+        &self,
+        tr: &mut Transaction,
+        out_msgs: Vec<Message>,
+        lt: Arc<AtomicU64>,
+    ) -> Result<u64> {
+        let mut lt = lt.fetch_add(1 + out_msgs.len() as u64, Ordering::Relaxed);
+        lt += 1;
+        for mut msg in out_msgs {
+            msg.set_at_and_lt(tr.now(), lt);
+            tr.add_out_message(&msg)?;
+            lt += 1;
+        }
+        Ok(lt)
+    }
+}
+
+/// Calculate new account state according to inbound message and current account
+/// state. If account does not exist - it can be created with uninitialized
+/// state. If account is uninitialized - it can be created with active state.
+/// If account exists - it can be frozen.
+/// Returns computed initial phase.
+fn compute_new_state(
+    acc: &mut Account,
+    acc_balance: &CurrencyCollection,
+    in_msg: &Message,
+    config: &BlockchainConfig,
+) -> Result<Option<ComputeSkipReason>> {
+    log::debug!(target: "executor", "compute_account_state");
+    let init_code_hash = config.has_capability(GlobalCapabilities::CapInitCodeHash);
+    let disable_set_lib = !config.has_capability(GlobalCapabilities::CapSetLibCode);
+    match acc.status() {
+        AccountStatus::AccStateNonexist => {
+            log::error!(target: "executor", "account must exist");
+            Ok(Some(if in_msg.state_init().is_none() {
+                ComputeSkipReason::NoState
+            } else {
+                ComputeSkipReason::BadState
+            }))
+        }
+        // Account exists, but can be in different states.
+        AccountStatus::AccStateActive => {
+            if let Some(state_init) = in_msg.state_init() {
+                let text = "Cannot process external message for active account with hash";
+                if !check_libraries(state_init, disable_set_lib, text, in_msg) {
+                    return Ok(Some(ComputeSkipReason::BadState));
+                }
+            }
+
+            if config.has_capability(GlobalCapabilities::CapSuspendedList) {
+                if let Some(suspended_addresses) = config.raw_config().suspended_addresses()? {
+                    let addr =
+                        acc.get_addr().ok_or_else(|| error!("active account must have address"))?;
+                    let wc = addr.workchain_id();
+                    let addr = UInt256::construct_from(&mut addr.address())?;
+
+                    if suspended_addresses.is_suspended(wc, addr)? {
+                        log::debug!(target: "executor", "account is suspended");
+                        return Ok(Some(ComputeSkipReason::Suspended));
+                    }
+                }
+            }
+
+            // account is active, just return it
+            log::debug!(target: "executor", "account state: AccountActive");
+            Ok(None)
+        }
+        AccountStatus::AccStateUninit => {
+            log::debug!(target: "executor", "AccountUninit");
+            if let Some(state_init) = in_msg.state_init() {
+                match in_msg.body() {
+                    Some(mut data) => {
+                        if in_msg.is_internal() {
+                            if let Ok(function_id) = data.get_next_u32() {
+                                log::trace!(target: "executor", "{} function_id", function_id);
+                                if function_id != 1 {
+                                    return Ok(Some(ComputeSkipReason::BadState));
+                                }
+                            } else {
+                                return Ok(Some(ComputeSkipReason::BadState));
+                            }
+                        }
+                        if in_msg.is_inbound_external() {
+                            let sign_bit = match data.get_next_bit() {
+                                Ok(bit) => bit,
+                                Err(_) => {
+                                    log::error!(target: "executor", "Failed to get sign_bit from external message body");
+                                    return Ok(Some(ComputeSkipReason::BadState));
+                                }
+                            };
+                            if sign_bit && data.get_next_bits(512).is_err() {
+                                log::error!(target: "executor", "Failed to get 512-bit signature from external message body");
+                                return Ok(Some(ComputeSkipReason::BadState));
+                            }
+                            let pubkey_bit = match data.get_next_bit() {
+                                Ok(bit) => bit,
+                                Err(_) => {
+                                    log::error!(target: "executor", "Failed to get pubkey_bit from external message body");
+                                    return Ok(Some(ComputeSkipReason::BadState));
+                                }
+                            };
+                            if pubkey_bit && data.get_next_bits(256).is_err() {
+                                log::error!(target: "executor", "Failed to get 256-bit public key from external message body");
+                                return Ok(Some(ComputeSkipReason::BadState));
+                            }
+                            if data.get_next_u64().is_err() {
+                                log::error!(target: "executor", "Failed to get timestamp (u64) from external message body");
+                                return Ok(Some(ComputeSkipReason::BadState));
+                            }
+                            if data.get_next_u32().is_err() {
+                                log::error!(target: "executor", "Failed to get expire (u32) from external message body");
+                                return Ok(Some(ComputeSkipReason::BadState));
+                            }
+                            match data.get_next_u32() {
+                                Ok(function_id) => {
+                                    log::trace!(target: "executor", "{} function_id", function_id);
+                                    if function_id != 1 {
+                                        log::error!(target: "executor", "Invalid function_id {} in external message, expected 1", function_id);
+                                        return Ok(Some(ComputeSkipReason::BadState));
+                                    }
+                                }
+                                Err(_) => {
+                                    log::error!(target: "executor", "Failed to get function_id (u32) from external message body");
+                                    return Ok(Some(ComputeSkipReason::BadState));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        return Ok(Some(ComputeSkipReason::BadState));
+                    }
+                }
+                // if msg is a constructor message then
+                // borrow code and data from it and switch account state to 'active'.
+                log::debug!(target: "executor", "message for uninitialized: activated");
+                let text = "Cannot construct account from message with hash";
+                if !check_libraries(state_init, disable_set_lib, text, in_msg) {
+                    return Ok(Some(ComputeSkipReason::BadState));
+                }
+                match acc.try_activate_by_init_code_hash(state_init, init_code_hash) {
+                    Err(err) => {
+                        log::debug!(target: "executor", "reason: {}", err);
+                        Ok(Some(ComputeSkipReason::BadState))
+                    }
+                    Ok(_) => Ok(None),
+                }
+            } else {
+                log::debug!(target: "executor", "message for uninitialized: skip computing phase");
+                Ok(Some(ComputeSkipReason::NoState))
+            }
+        }
+        AccountStatus::AccStateFrozen => {
+            log::debug!(target: "executor", "AccountFrozen");
+            // account balance was credited and if it positive after that
+            // and inbound message bear code and data then make some check and unfreeze
+            // account
+            if !acc_balance.grams.is_zero() {
+                // This check is redundant
+                if let Some(state_init) = in_msg.state_init() {
+                    let text = "Cannot unfreeze account from message with hash";
+                    if !check_libraries(state_init, disable_set_lib, text, in_msg) {
+                        return Ok(Some(ComputeSkipReason::BadState));
+                    }
+                    log::debug!(target: "executor", "message for frozen: activated");
+                    return match acc.try_activate_by_init_code_hash(state_init, init_code_hash) {
+                        Err(err) => {
+                            log::debug!(target: "executor", "reason: {}", err);
+                            Ok(Some(ComputeSkipReason::BadState))
+                        }
+                        Ok(_) => Ok(None),
+                    };
+                }
+            }
+            // skip computing phase, because account is frozen (bad state)
+            log::debug!(target: "executor", "account is frozen (bad state): skip computing phase");
+            Ok(Some(ComputeSkipReason::NoState))
+        }
+    }
+}
+
+fn check_replace_src_addr<'a>(
+    src: &'a Option<MsgAddressInt>,
+    acc_addr: &'a MsgAddressInt,
+) -> Option<&'a MsgAddressInt> {
+    match src {
+        None => Some(acc_addr),
+        Some(src) => match src {
+            MsgAddressInt::AddrStd(_) => {
+                if src != acc_addr {
+                    None
+                } else {
+                    Some(src)
+                }
+            }
+            MsgAddressInt::AddrVar(_) => None,
+        },
+    }
+}
+
+fn is_valid_addr_len(
+    addr_len: u16,
+    min_addr_len: u16,
+    max_addr_len: u16,
+    addr_len_step: u16,
+) -> bool {
+    (addr_len >= min_addr_len)
+        && (addr_len <= max_addr_len)
+        && ((addr_len == min_addr_len)
+            || (addr_len == max_addr_len)
+            || ((addr_len_step != 0) && ((addr_len - min_addr_len) % addr_len_step == 0)))
+}
+
+fn check_rewrite_dest_addr(
+    dst: &MsgAddressInt,
+    config: &BlockchainConfig,
+    my_addr: &MsgAddressInt,
+) -> std::result::Result<MsgAddressInt, IncorrectCheckRewrite> {
+    let (anycast_opt, addr_len, workchain_id, address, repack);
+    match dst {
+        MsgAddressInt::AddrVar(dst) => {
+            repack = (dst.addr_len.as_u32() == 256)
+                && (dst.workchain_id >= -128)
+                && (dst.workchain_id < 128);
+            anycast_opt = dst.anycast.clone();
+            addr_len = dst.addr_len.as_u16();
+            workchain_id = dst.workchain_id;
+            address = dst.address.clone();
+        }
+        MsgAddressInt::AddrStd(dst) => {
+            repack = false;
+            anycast_opt = dst.anycast.clone();
+            addr_len = 256;
+            workchain_id = dst.workchain_id as i32;
+            address = dst.address.clone();
+        }
+    }
+
+    let cap_workchains = config.raw_config().has_capability(GlobalCapabilities::CapWorkchains);
+    let is_masterchain = workchain_id == MASTERCHAIN_ID;
+    if !is_masterchain {
+        if !cap_workchains
+            && my_addr.workchain_id() != workchain_id
+            && my_addr.workchain_id() != MASTERCHAIN_ID
+        {
+            log::debug!(
+                target: "executor",
+                "cannot send message from {} to {} it doesn't allow yet",
+                my_addr, dst
+            );
+            return Err(IncorrectCheckRewrite::Other);
+        }
+        let workchains = config.raw_config().workchains().unwrap_or_default();
+        if let Ok(Some(wc)) = workchains.get(&workchain_id) {
+            if !wc.accept_msgs {
+                log::debug!(
+                    target: "executor",
+                    "destination address belongs to workchain {} not accepting new messages",
+                    workchain_id
+                );
+                return Err(IncorrectCheckRewrite::Other);
+            }
+            let (min_addr_len, max_addr_len, addr_len_step) = match wc.format {
+                WorkchainFormat::Extended(wf) => {
+                    (wf.min_addr_len(), wf.max_addr_len(), wf.addr_len_step())
+                }
+                WorkchainFormat::Basic(_) => (256, 256, 0),
+            };
+            if !is_valid_addr_len(addr_len, min_addr_len, max_addr_len, addr_len_step) {
+                log::debug!(
+                    target: "executor",
+                    "destination address has length {} invalid for destination workchain {}",
+                    addr_len, workchain_id
+                );
+                return Err(IncorrectCheckRewrite::Other);
+            }
+        } else {
+            log::debug!(
+                target: "executor",
+                "destination address contains unknown workchain_id {}",
+                workchain_id
+            );
+            return Err(IncorrectCheckRewrite::Other);
+        }
+    } else {
+        if !cap_workchains
+            && my_addr.workchain_id() != MASTERCHAIN_ID
+            && my_addr.workchain_id() != BASE_WORKCHAIN_ID
+        {
+            log::debug!(
+                target: "executor",
+                "masterchain cannot accept from {} workchain",
+                my_addr.workchain_id()
+            );
+            return Err(IncorrectCheckRewrite::Other);
+        }
+        if addr_len != 256 {
+            log::debug!(
+                target: "executor",
+                "destination address has length {} invalid for destination workchain {}",
+                addr_len, workchain_id
+            );
+            return Err(IncorrectCheckRewrite::Other);
+        }
+    }
+
+    if anycast_opt.is_some() {
+        log::debug!(target: "executor", "address cannot be anycast");
+        return Err(IncorrectCheckRewrite::Anycast);
+        // if is_masterchain {
+        // log::debug!(target: "executor", "masterchain address cannot be
+        // anycast"); return None
+        // }
+        // match src.address().get_slice(0, anycast.depth.as_usize()) {
+        // Ok(pfx) => {
+        // if pfx != anycast.rewrite_pfx {
+        // match AnycastInfo::with_rewrite_pfx(pfx) {
+        // Ok(anycast) => {
+        // repack = true;
+        // anycast_opt = Some(anycast)
+        // }
+        // Err(err) => {
+        // log::debug!(target: "executor", "Incorrect anycast prefix {}", err);
+        // return None
+        // }
+        // }
+        // }
+        // }
+        // Err(err) => {
+        // log::debug!(target: "executor", "Incorrect src address {}", err);
+        // return None
+        // }
+        // }
+    }
+
+    if !repack {
+        Ok(dst.clone())
+    } else if addr_len == 256 && (-128..128).contains(&workchain_id) {
+        // repack as an addr_std
+        MsgAddressInt::with_standart(anycast_opt, workchain_id as i8, address)
+            .map_err(|_| IncorrectCheckRewrite::Other)
+    } else {
+        // repack as an addr_var
+        MsgAddressInt::with_variant(anycast_opt, workchain_id, address)
+            .map_err(|_| IncorrectCheckRewrite::Other)
+    }
+}
+
+fn outmsg_action_handler(
+    phase: &mut TrActionPhase,
+    mut mode: u8,
+    msg: &mut Message,
+    acc_balance: &mut CurrencyCollection,
+    msg_balance: &mut CurrencyCollection,
+    //    compute_phase_fees: &Grams,
+    config: &BlockchainConfig,
+    is_special: bool,
+    my_addr: &MsgAddressInt,
+    reserved_value: &CurrencyCollection,
+    account_deleted: &mut bool,
+) -> std::result::Result<CurrencyCollection, i32> {
+    // we cannot send all balance from account and from message simultaneously ?
+    let invalid_flags = SENDMSG_REMAINING_MSG_BALANCE
+        | SENDMSG_ALL_BALANCE
+        | SENDMSG_IGNORE_ERROR
+        | SENDMSG_REMAINING_MSG_BALANCE;
+    if (mode & !SENDMSG_VALID_FLAGS) != 0
+        || (mode & invalid_flags) == invalid_flags
+        || ((mode & SENDMSG_DELETE_IF_EMPTY) != 0 && (mode & SENDMSG_ALL_BALANCE) == 0)
+    {
+        log::error!(target: "executor", "outmsg mode has unsupported flags");
+        return Err(RESULT_CODE_UNSUPPORTED);
+    }
+    let skip = Some(());
+    let (fwd_mine_fee, total_fwd_fees);
+    let mut result_value; // to sub from acc_balance
+
+    if let Some(new_src) = check_replace_src_addr(&msg.src(), my_addr) {
+        msg.set_src_address(new_src.clone());
+    } else {
+        log::warn!(target: "executor", "Incorrect source address {:?}", msg.src());
+        return Err(RESULT_CODE_INCORRECT_SRC_ADDRESS);
+    }
+
+    let fwd_prices_basic = config.get_fwd_prices(msg.is_masterchain());
+    let compute_fwd_fee = if is_special {
+        Grams::default()
+    } else {
+        msg
+            .serialize()
+            .and_then(|cell| config.calc_fwd_fee(msg.is_masterchain(), &cell))
+            .map_err(|err| {
+                log::error!(target: "executor", "cannot serialize message in action phase : {}", err);
+                RESULT_CODE_ACTIONLIST_INVALID
+            })?
+    };
+
+    if let Some(int_header) = msg.int_header_mut() {
+        let fwd_prices = fwd_prices_basic.clone();
+        match check_rewrite_dest_addr(&int_header.dst, config, my_addr) {
+            Ok(new_dst) => int_header.dst = new_dst,
+            Err(type_error) => {
+                if type_error == IncorrectCheckRewrite::Anycast {
+                    log::warn!(target: "executor", "Incorrect destination anycast address {}", int_header.dst);
+                    return Err(skip.map(|_| RESULT_CODE_ANYCAST).unwrap_or_default());
+                } else {
+                    log::warn!(target: "executor", "Incorrect destination address {}", int_header.dst);
+                    return Err(skip
+                        .map(|_| RESULT_CODE_INCORRECT_DST_ADDRESS)
+                        .unwrap_or_default());
+                }
+            }
+        }
+
+        int_header.bounced = false;
+        result_value = int_header.value.clone();
+
+        if cfg!(feature = "ihr_disabled") {
+            int_header.ihr_disabled = true;
+        }
+        if !int_header.ihr_disabled {
+            let compute_ihr_fee = fwd_prices
+                .ihr_fee_checked(&compute_fwd_fee)
+                .map_err(|_| RESULT_CODE_UNSUPPORTED)?;
+            if int_header.ihr_fee < compute_ihr_fee {
+                int_header.ihr_fee = compute_ihr_fee
+            }
+        } else {
+            int_header.ihr_fee = Grams::zero();
+        }
+        let fwd_fee = *std::cmp::max(&int_header.fwd_fee, &compute_fwd_fee);
+        fwd_mine_fee =
+            fwd_prices.mine_fee_checked(&fwd_fee).map_err(|_| RESULT_CODE_UNSUPPORTED)?;
+        total_fwd_fees = fwd_fee + int_header.ihr_fee;
+
+        let fwd_remain_fee = fwd_fee - fwd_mine_fee;
+
+        if (mode & SENDMSG_EXCHANGE_ECC) != 0 {
+            int_header.set_exchange(true);
+        } else {
+            int_header.set_exchange(false);
+            log::debug!(target: "executor", "Sanitizing is_exchange flag: forcing to false");
+        }
+
+        if (mode & SENDMSG_ALL_BALANCE) != 0 {
+            // send all remaining account balance
+            result_value = acc_balance.clone();
+            //    if need_to_reserve != 0 {
+            // match result_value.grams.sub(&Grams::from(need_to_burn)) {
+            // Ok(true) => (),
+            // Ok(false) => {
+            // result_value.grams = Grams::zero();
+            // return Err(skip.map(|_| RESULT_CODE_NOT_ENOUGH_GRAMS).unwrap_or_default());
+            // }
+            // Err(_) => return Err(RESULT_CODE_UNSUPPORTED),
+            // }
+            // }
+            int_header.value = result_value.clone();
+
+            mode &= !SENDMSG_PAY_FEE_SEPARATELY;
+        }
+        /*        if (mode & SENDMSG_REMAINING_MSG_BALANCE) != 0 {
+                    // send all remainig balance of inbound message
+                    result_value.add(msg_balance).ok();
+                    if (mode & SENDMSG_PAY_FEE_SEPARATELY) == 0 {
+                        if &result_value.grams < compute_phase_fees {
+                            return Err(skip.map(|_| RESULT_CODE_NOT_ENOUGH_GRAMS).unwrap_or_default());
+                        }
+                        result_value.grams.sub(compute_phase_fees).map_err(|err| {
+                            log::error!(target: "executor", "cannot subtract msg balance : {}", err);
+                            RESULT_CODE_ACTIONLIST_INVALID
+                        })?;
+                    }
+                    int_header.value = result_value.clone();
+                }
+        */
+        if (mode & SENDMSG_PAY_FEE_SEPARATELY) != 0 {
+            // we must pay the fees, sum them with msg value
+            result_value.grams += total_fwd_fees;
+        } else if int_header.value.grams < total_fwd_fees {
+            // msg value is too small, reciever cannot pay the fees
+            log::warn!(
+                target: "executor",
+                "msg balance {} is too small, cannot pay fwd+ihr fees: {}",
+                int_header.value.grams, total_fwd_fees
+            );
+            return Err(skip.map(|_| RESULT_CODE_NOT_ENOUGH_GRAMS).unwrap_or_default());
+        } else {
+            // reciever will pay the fees
+            int_header.value.grams -= total_fwd_fees;
+        }
+
+        // set evaluated fees and value back to msg
+        int_header.fwd_fee = fwd_remain_fee;
+    } else if msg.ext_out_header().is_some() || msg.ext_out_header_v2().is_some() {
+        fwd_mine_fee = compute_fwd_fee;
+        total_fwd_fees = compute_fwd_fee;
+        result_value = CurrencyCollection::from_grams(compute_fwd_fee);
+    } else {
+        return Err(-1);
+    }
+
+    if acc_balance.grams < result_value.grams {
+        log::warn!(
+            target: "executor",
+            "account balance {} is too small, cannot send {}", acc_balance.grams, result_value.grams
+        );
+        return Err(skip.map(|_| RESULT_CODE_NOT_ENOUGH_GRAMS).unwrap_or_default());
+    }
+    match acc_balance.sub(&result_value) {
+        Ok(false) | Err(_) => {
+            log::warn!(
+                target: "executor",
+                "account balance {} is too small, cannot send {}", acc_balance, result_value
+            );
+            return Err(skip.map(|_| RESULT_CODE_NOT_ENOUGH_EXTRA).unwrap_or_default());
+        }
+        _ => (),
+    }
+    let mut acc_balance_copy = ExtraCurrencyCollection::default();
+    let predicate = |key: u32, b: tvm_block::VarUInteger32| -> Result<bool> {
+        if !b.is_zero() {
+            acc_balance_copy.set(&key, &b)?;
+        }
+        Ok(true)
+    };
+    match acc_balance.other.iterate_with_keys(predicate) {
+        Ok(false) | Err(_) => {
+            log::warn!(target: "executor", "Cannot reduce account extra balance");
+            return Err(skip.map(|_| RESULT_CODE_INVALID_BALANCE).unwrap_or_default());
+        }
+        _ => (),
+    }
+    std::mem::swap(&mut acc_balance.other, &mut acc_balance_copy);
+
+    if (mode & SENDMSG_DELETE_IF_EMPTY) != 0
+        && (mode & SENDMSG_ALL_BALANCE) != 0
+        && acc_balance.grams == Grams::from(0)
+        && reserved_value.grams.is_zero()
+    {
+        *account_deleted = true;
+    }
+
+    // total fwd fees is sum of messages full fwd and ihr fees
+    phase.add_fwd_fees(total_fwd_fees);
+
+    // total action fees is sum of messages fwd mine fees
+    phase.add_action_fees(fwd_mine_fee);
+
+    let msg_cell = msg.serialize().map_err(|err| {
+        log::error!(target: "executor", "cannot serialize message in action phase : {}", err);
+        RESULT_CODE_ACTIONLIST_INVALID
+    })?;
+    phase.tot_msg_size.append(&msg_cell);
+
+    if phase.tot_msg_size.bits() as usize > MAX_MSG_BITS
+        || phase.tot_msg_size.cells() as usize > MAX_MSG_CELLS
+    {
+        log::warn!(target: "executor", "message too large : bits: {}, cells: {}", phase.tot_msg_size.bits(), phase.tot_msg_size.cells());
+        return Err(RESULT_CODE_INVALID_BALANCE);
+    }
+
+    //    if (mode & (SENDMSG_ALL_BALANCE | SENDMSG_REMAINING_MSG_BALANCE)) != 0 {
+    if mode & SENDMSG_ALL_BALANCE != 0 {
+        *msg_balance = CurrencyCollection::default();
+    }
+
+    log::debug!(target: "executor", "Message details:\n\tFlag: {}\n\tValue: {}\n\tSource: {}\n\tDestination: {}\n\tBody: {}\n\tStateInit: {}",
+        mode,
+        balance_to_string(&result_value),
+        msg.src().map_or("None".to_string(), |addr| addr.to_string()),
+        msg.dst().map_or("None".to_string(), |addr| addr.to_string()),
+        msg.body().map_or("None".to_string(), |data| data.to_string()),
+        msg.state_init().map_or("None".to_string(), |_| "Present".to_string())
+    );
+
+    Ok(result_value)
+}
+
+/// Reserves some grams from accout balance.
+/// Returns calculated reserved value. its calculation depends on mode.
+/// Reduces balance by the amount of the reserved value.
+fn reserve_action_handler(
+    mode: u8,
+    val: &mut CurrencyCollection,
+    acc_remaining_balance: &mut CurrencyCollection,
+    need_to_reserve: &mut u64,
+) -> std::result::Result<CurrencyCollection, i32> {
+    if mode > RESERVE_ALL_BUT {
+        return Err(RESULT_CODE_UNKNOWN_OR_INVALID_ACTION);
+    }
+    if mode & RESERVE_ALL_BUT == 0 {
+        if *need_to_reserve != 0 {
+            match val.grams.add(&Grams::from(*need_to_reserve)) {
+                Ok(true) => (),
+                Ok(false) => return Err(RESULT_CODE_UNSUPPORTED),
+                Err(_) => return Err(RESULT_CODE_INVALID_BALANCE),
+            }
+            *need_to_reserve = 0;
+        }
+    } else {
+        if acc_remaining_balance.grams < Grams::from(*need_to_reserve) + val.grams {
+            return Err(RESULT_CODE_INVALID_BALANCE);
+        }
+        if *need_to_reserve != 0 {
+            *need_to_reserve = 0;
+        }
+    }
+    log::debug!(target: "executor", "Reserve with mode = {} value = {}", mode, balance_to_string(val));
+
+    let mut reserved = val.clone();
+    let mut remaining = acc_remaining_balance.clone();
+    if remaining.grams.as_u128() < reserved.grams.as_u128() {
+        return Err(RESULT_CODE_NOT_ENOUGH_GRAMS);
+    }
+    let result = remaining.sub(&reserved);
+    match result {
+        Err(_) => return Err(RESULT_CODE_INVALID_BALANCE),
+        Ok(false) => return Err(RESULT_CODE_NOT_ENOUGH_EXTRA),
+        Ok(true) => (),
+    }
+    std::mem::swap(&mut remaining, acc_remaining_balance);
+
+    if mode & RESERVE_ALL_BUT != 0 {
+        // swap all currencies
+        std::mem::swap(&mut reserved, acc_remaining_balance);
+    }
+
+    Ok(reserved)
+}
+
+fn setcode_action_handler(acc: &mut Account, code: Cell) -> Option<i32> {
+    log::debug!(target: "executor", "OutAction::SetCode\nPrevious code hash: {:x}\nNew code hash:      {:x}",
+        acc.get_code().unwrap_or_default().repr_hash(),
+        code.repr_hash(),
+    );
+    match acc.set_code(code) {
+        true => None,
+        false => Some(RESULT_CODE_BAD_ACCOUNT_STATE),
+    }
+}
+
+fn change_library_action_handler(
+    acc: &mut Account,
+    mode: u8,
+    code: Option<Cell>,
+    hash: Option<UInt256>,
+) -> Option<i32> {
+    let result = match (code, hash) {
+        (Some(code), None) => {
+            log::debug!(target: "executor", "OutAction::ChangeLibrary mode: {}, code: {}", mode, code);
+            if mode == 0 {
+                // TODO: Wrong codes. Look tvm_block/out_actions::SET_LIB_CODE_REMOVE
+                acc.delete_library(&code.repr_hash())
+            } else {
+                acc.set_library(code, (mode & 2) == 2)
+            }
+        }
+        (None, Some(hash)) => {
+            log::debug!(target: "executor", "OutAction::ChangeLibrary mode: {}, hash: {:x}", mode, hash);
+            if mode == 0 {
+                acc.delete_library(&hash)
+            } else {
+                acc.set_library_flag(&hash, (mode & 2) == 2)
+            }
+        }
+        _ => false,
+    };
+    match result {
+        true => None,
+        false => Some(RESULT_CODE_BAD_ACCOUNT_STATE),
+    }
+}
+
+fn init_gas(
+    acc_balance: u128,
+    msg_balance: u128,
+    is_external: bool,
+    is_special: bool,
+    is_ordinary: bool,
+    gas_info: &GasLimitsPrices,
+) -> Gas {
+    let gas_max = if is_special {
+        gas_info.special_gas_limit
+    } else {
+        min(
+            (1 << (7 * 8)) - 1, // because gas_limit is stored as VarUInteger7
+            min(gas_info.gas_limit, gas_info.calc_gas(acc_balance)),
+        )
+    };
+    let mut gas_credit = 0;
+    let gas_limit = if !is_ordinary {
+        gas_max
+    } else {
+        if is_external {
+            gas_credit = min(
+                (1 << (3 * 8)) - 1, // because gas_credit is stored as VarUInteger3
+                min(gas_info.gas_credit, gas_max),
+            );
+        }
+        min(gas_max, gas_info.calc_gas(msg_balance))
+    };
+    log::debug!(
+        target: "executor",
+        "gas before: gm: {}, gl: {}, gc: {}, price: {}",
+        gas_max, gas_limit, gas_credit, gas_info.get_real_gas_price()
+    );
+    Gas::new(
+        gas_limit as i64,
+        gas_credit as i64,
+        gas_max as i64,
+        gas_info.get_real_gas_price() as i64,
+    )
+}
+
+fn check_libraries(init: &StateInit, disable_set_lib: bool, text: &str, msg: &Message) -> bool {
+    match init.libraries().len() {
+        Ok(len) => {
+            if !disable_set_lib || len == 0 {
+                true
+            } else {
+                log::trace!(
+                    target: "executor",
+                    "{} {:x} because libraries are disabled",
+                        text, msg.hash().unwrap_or_default()
+                );
+                false
+            }
+        }
+        Err(err) => {
+            log::trace!(
+                target: "executor",
+                "{} {:x} because libraries are broken {}",
+                    text, msg.hash().unwrap_or_default(), err
+            );
+            false
+        }
+    }
+}
+
+/// Calculate new account according to inbound message.
+/// If message has no value, account will not created.
+/// If hash of state_init is equal to account address (or flag check address is
+/// false), account will be active. Otherwise, account will be nonexist or
+/// uninit according bounce flag: if bounce, account will be uninit that save
+/// money.
+fn account_from_message(
+    msg: &Message,
+    msg_remaining_balance: &CurrencyCollection,
+    check_address: bool,
+    init_code_hash: bool,
+    disable_set_lib: bool,
+) -> Option<Account> {
+    let hdr = msg.int_header()?;
+    if let Some(init) = msg.state_init() {
+        if init.code().is_some() {
+            if !check_address || (init.hash().ok()? == hdr.dst.address()) {
+                let text = "Cannot construct account from message with hash";
+                if check_libraries(init, disable_set_lib, text, msg) {
+                    return Account::active_by_init_code_hash(
+                        hdr.dst.clone(),
+                        msg_remaining_balance.clone(),
+                        0,
+                        init.clone(),
+                        init_code_hash,
+                    )
+                    .ok();
+                }
+            } else if check_address {
+                log::trace!(
+                    target: "executor",
+                    "Cannot construct account from message with hash {:x} \
+                        because the destination address does not math with hash message code",
+                        msg.hash().unwrap_or_default()
+                );
+            }
+        }
+    }
+    if hdr.bounce {
+        log::trace!(
+            target: "executor",
+            "Account will not be created. Value of {:x} message will be returned",
+            msg.hash().unwrap_or_default()
+        );
+        None
+    } else {
+        Some(Account::uninit(hdr.dst.clone(), 0, 0, msg_remaining_balance.clone()))
+    }
+}
+
+fn balance_to_string(balance: &CurrencyCollection) -> String {
+    let value = balance.grams.as_u128();
+    format!(
+        "{}.{:03} {:03} {:03}      ({})",
+        value / 1e9 as u128,
+        (value % 1e9 as u128) / 1e6 as u128,
+        (value % 1e6 as u128) / 1e3 as u128,
+        value % 1e3 as u128,
+        value,
+    )
+}
+
+fn action_type(action: &OutAction) -> String {
+    match action {
+        OutAction::SendMsg { mode: _, out_msg: _ } => "SendMsg".to_string(),
+        OutAction::SetCode { new_code: _ } => "SetCode".to_string(),
+        OutAction::ReserveCurrency { mode: _, value: _ } => "ReserveCurrency".to_string(),
+        OutAction::ChangeLibrary { mode: _, code: _, hash: _ } => "ChangeLibrary".to_string(),
+        OutAction::MintShellToken { value: _ } => "MintShellToken".to_string(),
+        OutAction::MintShellQToken { value: _ } => "MintShellQToken".to_string(),
+        OutAction::SendToDappConfigToken { value: _ } => "SendToDappConfigToken".to_string(),
+        OutAction::ExchangeShell { value: _ } => "ExchangeShell".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tvm_block::AccStatusChange;
+    use tvm_block::Account;
+    use tvm_block::AccountStatus;
+    use tvm_block::AnycastInfo;
+    use tvm_block::ConfigParam8;
+    use tvm_block::ConfigParam18;
+    use tvm_block::ConfigParam31;
+    use tvm_block::ConfigParamEnum;
+    use tvm_block::ConfigParams;
+    use tvm_block::CurrencyCollection;
+    use tvm_block::GlobalVersion;
+    use tvm_block::HashUpdate;
+    use tvm_block::InternalMessageHeader;
+    use tvm_block::Message;
+    use tvm_block::MsgAddressInt;
+    use tvm_block::MsgForwardPrices;
+    use tvm_block::OutAction;
+    use tvm_block::RESERVE_ALL_BUT;
+    use tvm_block::Serializable;
+    use tvm_block::StateInit;
+    use tvm_block::StoragePrices;
+    use tvm_block::TrActionPhase;
+    use tvm_block::Transaction;
+    use tvm_block::TransactionDescr;
+    use tvm_block::TransactionDescrOrdinary;
+    use tvm_types::BuilderData;
+    use tvm_types::Cell;
+    use tvm_types::DataCell;
+    use tvm_types::DataCellError;
+    use tvm_types::Result;
+    use tvm_types::SliceData;
+    use tvm_types::UInt256;
+    use tvm_vm::executor::MVConfig;
+    use tvm_vm::stack::Stack;
+    use tvm_vm::stack::StackItem;
+
+    use super::*;
+    use crate::BlockchainConfig;
+    use crate::OrdinaryTransactionExecutor;
+    use crate::blockchain_config::TONDefaultConfig;
+    use crate::test_utils::BuildActionsExecuteParamsFixture;
+
+    struct DummyExecutor {
+        config: BlockchainConfig,
+    }
+
+    impl DummyExecutor {
+        fn new() -> Self {
+            Self { config: BlockchainConfig::default() }
+        }
+    }
+
+    impl TransactionExecutor for DummyExecutor {
+        fn execute_with_params(
+            &self,
+            _in_msg: Option<&Message>,
+            account: &mut Account,
+            _params: ExecuteParams,
+            minted_shell: &mut i128,
+        ) -> Result<Transaction> {
+            *minted_shell = 7;
+            let mut tx = Transaction::with_address_and_status(
+                account.get_id().unwrap(),
+                AccountStatus::AccStateUninit,
+            );
+            tx.set_now(11);
+            tx.write_state_update(&HashUpdate::default())?;
+            Ok(tx)
+        }
+
+        fn ordinary_transaction(&self) -> bool {
+            false
+        }
+
+        fn config(&self) -> &BlockchainConfig {
+            &self.config
+        }
+
+        fn build_stack(&self, _in_msg: Option<&Message>, _account: &Account) -> Stack {
+            Stack::new()
+        }
+    }
+
+    struct FailingExecutor {
+        config: BlockchainConfig,
+    }
+
+    impl FailingExecutor {
+        fn new() -> Self {
+            Self { config: BlockchainConfig::default() }
+        }
+    }
+
+    impl TransactionExecutor for FailingExecutor {
+        fn execute_with_params(
+            &self,
+            _in_msg: Option<&Message>,
+            _account: &mut Account,
+            _params: ExecuteParams,
+            _minted_shell: &mut i128,
+        ) -> Result<Transaction> {
+            fail!("intentional executor failure")
+        }
+
+        fn ordinary_transaction(&self) -> bool {
+            false
+        }
+
+        fn config(&self) -> &BlockchainConfig {
+            &self.config
+        }
+
+        fn build_stack(&self, _in_msg: Option<&Message>, _account: &Account) -> Stack {
+            Stack::new()
+        }
+    }
+
+    struct BloomProbeExecutor {
+        config: BlockchainConfig,
+        leaf: Cell,
+    }
+
+    impl BloomProbeExecutor {
+        fn new(leaf: Cell) -> Self {
+            Self { config: BlockchainConfig::default(), leaf }
+        }
+    }
+
+    impl TransactionExecutor for BloomProbeExecutor {
+        fn execute_with_params(
+            &self,
+            _in_msg: Option<&Message>,
+            account: &mut Account,
+            _params: ExecuteParams,
+            minted_shell: &mut i128,
+        ) -> Result<Transaction> {
+            let bloom_was_cold = bloom_limited_parent_result(&self.leaf).is_err();
+            *minted_shell = i128::from(bloom_was_cold);
+            let mut tx = Transaction::with_address_and_status(
+                account.get_id().unwrap(),
+                AccountStatus::AccStateUninit,
+            );
+            tx.set_now(if bloom_was_cold { 21 } else { 22 });
+            tx.write_state_update(&HashUpdate::default())?;
+            Ok(tx)
+        }
+
+        fn ordinary_transaction(&self) -> bool {
+            false
+        }
+
+        fn config(&self) -> &BlockchainConfig {
+            &self.config
+        }
+
+        fn build_stack(&self, _in_msg: Option<&Message>, _account: &Account) -> Stack {
+            Stack::new()
+        }
+    }
+
+    fn address(byte: u8) -> MsgAddressInt {
+        MsgAddressInt::with_standart(None, 0, UInt256::with_array([byte; 32]).into()).unwrap()
+    }
+
+    fn masterchain_address(byte: u8) -> MsgAddressInt {
+        MsgAddressInt::with_standart(None, -1, UInt256::with_array([byte; 32]).into()).unwrap()
+    }
+
+    fn byte_cell(byte: u8) -> Cell {
+        BuilderData::with_raw(vec![byte], 8).unwrap().into_cell().unwrap()
+    }
+
+    fn assert_numeric_cell_limits_cleared() {
+        DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow(|x| assert!(x.is_none()));
+        DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow(|x| assert!(x.is_none()));
+    }
+
+    fn reset_cell_tls() {
+        DataCell::reset_unique_bloom();
+        DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = None);
+        DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow_mut(|x| *x = None);
+    }
+
+    fn bloom_test_leaf() -> Cell {
+        byte_cell(0xA5)
+    }
+
+    fn build_bloom_test_parent(leaf: &Cell) -> Result<Cell> {
+        BuilderData::with_raw_and_refs(vec![0x5A], 8, [leaf.clone()])?.into_cell()
+    }
+
+    fn warm_unique_bloom_with_leaf(leaf: &Cell) {
+        let old_depth = DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow(|x| *x);
+        let old_bits = DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow(|x| *x);
+        DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = None);
+        DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow_mut(|x| *x = None);
+        build_bloom_test_parent(leaf).unwrap();
+        DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = old_depth);
+        DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow_mut(|x| *x = old_bits);
+    }
+
+    fn bloom_limited_parent_result(leaf: &Cell) -> Result<Cell> {
+        let old_depth = DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow(|x| *x);
+        let old_bits = DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow(|x| *x);
+        DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = None);
+        DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT
+            .with_borrow_mut(|x| *x = Some(leaf.tree_bits_count()));
+        let result = build_bloom_test_parent(leaf);
+        DataCell::UNIQUE_MAX_ALLOWED_CELL_DEPTH.with_borrow_mut(|x| *x = old_depth);
+        DataCell::UNIQUE_MAX_ALLOWED_NESTED_CELL_BIT_COUNT.with_borrow_mut(|x| *x = old_bits);
+        result
+    }
+
+    fn assert_max_boc_size_exceeded(result: Result<Cell>) {
+        let err = result.expect_err("cold Bloom must count the referenced child");
+        assert!(err.downcast_ref::<DataCellError>().is_some(), "{err:?}");
+    }
+
+    fn storage_prices() -> ConfigParam18 {
+        let mut prices = ConfigParam18::default();
+        prices
+            .insert(&StoragePrices {
+                utime_since: 1,
+                bit_price_ps: 2,
+                cell_price_ps: 4,
+                mc_bit_price_ps: 8,
+                mc_cell_price_ps: 16,
+            })
+            .unwrap();
+        prices
+    }
+
+    fn gas_prices() -> GasLimitsPrices {
+        GasLimitsPrices {
+            gas_price: 65_536,
+            gas_limit: 1_000_000,
+            special_gas_limit: 1_000_000,
+            gas_credit: 10_000,
+            block_gas_limit: 1_000_000,
+            freeze_due_limit: 5,
+            delete_due_limit: 8,
+            max_gas_threshold: 1_000_000_000,
+            flat_gas_limit: 10,
+            flat_gas_price: 10,
+        }
+    }
+
+    fn executor_config() -> BlockchainConfig {
+        executor_config_with_capabilities(0x572e)
+    }
+
+    fn executor_config_with_capabilities(capabilities: u64) -> BlockchainConfig {
+        let mut config = ConfigParams {
+            config_addr: UInt256::with_array([0x55; 32]),
+            ..ConfigParams::default()
+        };
+        config
+            .set_config(ConfigParamEnum::ConfigParam8(ConfigParam8 {
+                global_version: GlobalVersion { version: 42, capabilities },
+            }))
+            .unwrap();
+        config.set_config(ConfigParamEnum::ConfigParam18(storage_prices())).unwrap();
+        config.set_config(ConfigParamEnum::ConfigParam20(gas_prices())).unwrap();
+        config.set_config(ConfigParamEnum::ConfigParam21(gas_prices())).unwrap();
+        config.set_config(ConfigParamEnum::ConfigParam24(MsgForwardPrices::default_mc())).unwrap();
+        config.set_config(ConfigParamEnum::ConfigParam25(MsgForwardPrices::default_wc())).unwrap();
+        config.set_config(ConfigParamEnum::ConfigParam31(ConfigParam31::new())).unwrap();
+        BlockchainConfig::with_config(config).unwrap()
+    }
+
+    fn active_account(byte: u8) -> Account {
+        let mut state_init = StateInit::default();
+        state_init.set_code(byte_cell(byte));
+        state_init.set_data(byte_cell(byte.wrapping_add(1)));
+        Account::active_by_init_code_hash(
+            address(byte),
+            CurrencyCollection::with_grams(100),
+            0,
+            state_init,
+            false,
+        )
+        .unwrap()
+    }
+
+    fn active_account_with_code(byte: u8, code: Cell) -> Account {
+        let mut state_init = StateInit::default();
+        state_init.set_code(code);
+        state_init.set_data(Cell::default());
+        Account::active_by_init_code_hash(
+            address(byte),
+            CurrencyCollection::with_grams(1_000_000_000),
+            0,
+            state_init,
+            false,
+        )
+        .unwrap()
+    }
+
+    fn internal_message(src: u8, dst: u8) -> Message {
+        Message::with_int_header(InternalMessageHeader::with_addresses(
+            address(src),
+            address(dst),
+            CurrencyCollection::with_grams(1_000_000_000),
+        ))
+    }
+
+    fn execute_node_contract(
+        code: &str,
+        params: ExecuteParams,
+    ) -> std::result::Result<(Transaction, i128), anyhow::Error> {
+        execute_node_contract_with_config(code, params, executor_config())
+    }
+
+    fn execute_node_contract_with_config(
+        code: &str,
+        params: ExecuteParams,
+        config: BlockchainConfig,
+    ) -> std::result::Result<(Transaction, i128), anyhow::Error> {
+        let executor = OrdinaryTransactionExecutor::new(config);
+        let code = tvm_assembler::compile_code_to_cell(code).unwrap();
+        let account = active_account_with_code(7, code);
+        let mut account_root = account.serialize().unwrap();
+        executor.execute_with_libs_and_params(
+            Some(&internal_message(1, 7)),
+            &mut account_root,
+            params,
+        )
+    }
+
+    fn ordinary_description(tx: &Transaction) -> TransactionDescrOrdinary {
+        match tx.read_description().unwrap() {
+            TransactionDescr::Ordinary(description) => description,
+            _ => panic!("unexpected transaction description"),
+        }
+    }
+
+    fn vm_phase(tx: &Transaction) -> TrComputePhaseVm {
+        match ordinary_description(tx).compute_ph {
+            TrComputePhase::Vm(phase) => phase,
+            _ => panic!("unexpected compute phase"),
+        }
+    }
+
+    fn run_mint_shellq_action(
+        available_credit: i128,
+        initial_minted_shell: i128,
+        requested: u64,
+    ) -> (ActionPhaseResult, i128, u128) {
+        let executor = DummyExecutor::new();
+        let mut account = active_account(8);
+        let mut tx = Transaction::with_address_and_status(address(8).address(), account.status());
+        let original_balance = account.balance().cloned().unwrap();
+        let mut acc_balance = original_balance.clone();
+        let mut msg_balance = CurrencyCollection::default();
+        let mut actions = OutActions::default();
+        actions.push_back(OutAction::new_mint_shellq(requested));
+        let mut minted_shell = initial_minted_shell;
+
+        let result = executor
+            .action_phase_with_copyleft(
+                &mut tx,
+                &mut account,
+                &original_balance,
+                &mut acc_balance,
+                &mut msg_balance,
+                &Grams::zero(),
+                actions.serialize().unwrap(),
+                None,
+                &address(8),
+                false,
+                available_credit,
+                &mut minted_shell,
+                Grams::zero(),
+                Some(UInt256::with_array([0x99; 32])),
+            )
+            .unwrap();
+
+        (result, minted_shell, acc_balance.grams.as_u128() - original_balance.grams.as_u128())
+    }
+
+    fn bytes_to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[cfg(feature = "wasmtime")]
+    fn bytes_from_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[cfg(feature = "wasmtime")]
+    fn run_wasm_hash_stack(wasm_hash: &[u8]) -> Stack {
+        use tvm_abi::TokenValue;
+        use tvm_abi::contract::ABI_VERSION_2_4;
+
+        let hash_cell =
+            TokenValue::write_bytes(wasm_hash, &ABI_VERSION_2_4).unwrap().into_cell().unwrap();
+        let args_cell =
+            TokenValue::write_bytes(&[1u8, 2u8], &ABI_VERSION_2_4).unwrap().into_cell().unwrap();
+        let function_cell = tvm_vm::utils::pack_data_to_cell(b"add", &mut 0).unwrap();
+        let instance_cell =
+            tvm_vm::utils::pack_data_to_cell(b"docs:adder/add-interface@0.1.0", &mut 0).unwrap();
+        let dict_cell =
+            TokenValue::write_bytes(&[], &ABI_VERSION_2_4).unwrap().into_cell().unwrap();
+
+        let mut stack = Stack::new();
+        stack.push(StackItem::cell(hash_cell));
+        stack.push(StackItem::cell(args_cell));
+        stack.push(StackItem::cell(function_cell));
+        stack.push(StackItem::cell(instance_cell));
+        stack.push(StackItem::cell(dict_cell));
+        stack
+    }
+
+    #[allow(deprecated)]
+    fn compute_node_contract(
+        code: &str,
+        argument_stack: Stack,
+        params: ExecuteParams,
+    ) -> TrComputePhaseVm {
+        let executor = OrdinaryTransactionExecutor::new(executor_config());
+        let code = tvm_assembler::compile_code_to_cell(code).unwrap();
+        let mut account = active_account_with_code(7, code);
+        let mut msg = internal_message(1, 7);
+        let mut acc_balance = account.balance().cloned().unwrap();
+        let mut msg_balance = CurrencyCollection::with_grams(1_000_000_000);
+        let smc_info =
+            executor.build_contract_info(&acc_balance, &address(7), 0, 0, 0, UInt256::default());
+        let mut stack = executor.build_stack(Some(&msg), &account);
+        for index in (0..argument_stack.depth()).rev() {
+            stack.push(argument_stack.get(index).clone());
+        }
+
+        let (phase, _, _) = executor
+            .compute_phase(
+                Some(&mut msg),
+                &mut account,
+                &mut acc_balance,
+                &mut msg_balance,
+                smc_info,
+                stack,
+                0,
+                false,
+                false,
+                &params,
+            )
+            .unwrap();
+        match phase {
+            TrComputePhase::Vm(phase) => phase,
+            _ => panic!("unexpected compute phase"),
+        }
+    }
+
+    fn currency_other_u64(balance: &CurrencyCollection, key: u32) -> u64 {
+        let Some(value) = balance.get_other(key).unwrap() else {
+            return 0;
+        };
+        value.value().iter_u64_digits().next().unwrap_or(0)
+    }
+
+    fn cross_dapp_exchange_balance(engine_version: semver::Version) -> CurrencyCollection {
+        let executor = OrdinaryTransactionExecutor::new(executor_config());
+        let code = tvm_assembler::compile_code_to_cell("PUSHINT 1\n").unwrap();
+        let account = active_account_with_code(7, code);
+        let mut account_root = account.serialize().unwrap();
+        let mut msg_value = CurrencyCollection::with_grams(1_000_000_000);
+        msg_value.set_other(2, 123).unwrap();
+        let mut header = InternalMessageHeader::with_addresses(address(1), address(7), msg_value);
+        header.set_src_dapp_id(Some(UInt256::with_array([0x33; 32])));
+        header.set_exchange(true);
+        let msg = Message::with_int_header(header);
+
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.dapp_id = Some(UInt256::with_array([0x22; 32]));
+        fixture.engine_version = engine_version;
+        let (tx, _) = executor
+            .execute_with_libs_and_params(Some(&msg), &mut account_root, fixture.build())
+            .unwrap();
+        let phase = vm_phase(&tx);
+        assert!(phase.success, "{phase:?}");
+
+        Account::construct_from_cell(account_root).unwrap().balance_checked()
+    }
+
+    fn uint64_array_cell(values: &[u64]) -> Cell {
+        use tvm_abi::TokenValue;
+        use tvm_abi::contract::ABI_VERSION_2_2;
+        use tvm_abi::param_type::ParamType;
+
+        let items = values
+            .iter()
+            .map(|value| TokenValue::Uint(tvm_abi::Uint::new(*value as u128, 64)))
+            .collect();
+        TokenValue::Array(ParamType::Uint(64), items)
+            .pack_into_chain(&ABI_VERSION_2_2)
+            .unwrap()
+            .into_cell()
+            .unwrap()
+    }
+
+    fn calc_mv_reward_stack() -> Stack {
+        let mut stack = Stack::new();
+        stack.push(StackItem::int(0));
+        stack.push(StackItem::int(0));
+        stack.push(StackItem::cell(uint64_array_cell(&[1, 1])));
+        stack.push(StackItem::int(2));
+        stack.push(StackItem::int(1_000_000_000));
+        stack
+    }
+
+    #[test]
+    fn action_phase_result_from_phase_starts_empty() {
+        let phase = TrActionPhase {
+            success: true,
+            valid: true,
+            no_funds: false,
+            status_change: AccStatusChange::Unchanged,
+            ..Default::default()
+        };
+
+        let result = ActionPhaseResult::from_phase(phase.clone());
+        assert_eq!(result.phase, phase);
+        assert!(result.messages.is_empty());
+        assert!(result.copyleft_reward.is_none());
+    }
+
+    #[test]
+    fn execute_with_libs_and_params_runs_ordinary_transaction_with_non_default_params() {
+        let executor = OrdinaryTransactionExecutor::new(executor_config());
+        let dapp_id = UInt256::with_array([0x44; 32]);
+        let vm_execution_is_block_related = Arc::new(Mutex::new(false));
+        let block_collation_was_finished = Arc::new(Mutex::new(false));
+        let last_tr_lt = Arc::new(AtomicU64::new(100));
+        let trace_steps = Arc::new(AtomicU64::new(0));
+        let mut mvconfig = MVConfig::default();
+        mvconfig.set_config(vec![3, 5, 8]);
+        let trace_steps_callback = trace_steps.clone();
+        let trace_callback: Arc<tvm_vm::executor::TraceCallback> = Arc::new(move |_, _| {
+            trace_steps_callback.fetch_add(1, Ordering::Relaxed);
+        });
+        let mut fixture = BuildActionsExecuteParamsFixture::tvm_tracing(trace_callback);
+        fixture.block_unixtime = 123;
+        fixture.block_lt = 456;
+        fixture.seq_no = 7;
+        fixture.last_tr_lt = last_tr_lt.clone();
+        fixture.seed_block = UInt256::with_array([0x77; 32]);
+        fixture.dapp_id = Some(dapp_id.clone());
+        fixture.available_credit = 13;
+        fixture.termination_deadline = Some(Instant::now() + Duration::from_secs(30));
+        fixture.execution_timeout = Some(Duration::from_secs(30));
+        fixture.vm_execution_is_block_related = vm_execution_is_block_related.clone();
+        fixture.block_collation_was_finished = block_collation_was_finished.clone();
+        fixture.mvconfig = mvconfig;
+        fixture.engine_version = semver::Version::new(1, 0, 3);
+        let params = fixture.build();
+
+        let code = tvm_assembler::compile_code_to_cell(
+            "NOW\nPUSHINT 123\nEQUAL\nTHROWIFNOT 100\n\
+             BLOCKLT\nPUSHINT 456\nEQUAL\nTHROWIFNOT 101\n\
+             SEQNO\nPUSHINT 7\nEQUAL\nTHROWIFNOT 102\n",
+        )
+        .unwrap();
+        let account = active_account_with_code(7, code);
+        let mut account_root = account.serialize().unwrap();
+        let mut header = InternalMessageHeader::with_addresses(
+            address(1),
+            address(7),
+            CurrencyCollection::with_grams(1_000_000_000),
+        );
+        header.set_src_dapp_id(Some(dapp_id));
+        let msg = Message::with_int_header(header);
+
+        let (tx, minted_shell) =
+            executor.execute_with_libs_and_params(Some(&msg), &mut account_root, params).unwrap();
+
+        assert_eq!(minted_shell, 0);
+        assert_eq!(tx.account_id(), &address(7).address());
+        assert_eq!(tx.now(), 123);
+        assert_eq!(tx.logical_time(), 100);
+        assert_eq!(last_tr_lt.load(Ordering::Relaxed), 101);
+        assert!(trace_steps.load(Ordering::Relaxed) > 0);
+        assert!(*vm_execution_is_block_related.lock().unwrap());
+        match tx.read_description().unwrap() {
+            TransactionDescr::Ordinary(description) => {
+                let action = description.action.expect("action phase");
+                assert!(action.success);
+                assert_eq!(action.tot_actions, 0);
+                assert_eq!(action.spec_actions, 0);
+            }
+            _ => panic!("unexpected transaction description"),
+        }
+        let updated = Account::construct_from_cell(account_root).unwrap();
+        assert!(updated.storage_info().is_some());
+        assert_eq!(updated.get_id().unwrap(), address(7).address());
+        assert_numeric_cell_limits_cleared();
+    }
+
+    #[test]
+    fn execute_with_libs_and_params_clears_numeric_tls_on_error_path() {
+        reset_cell_tls();
+        let executor = FailingExecutor::new();
+        let account = active_account(31);
+        let mut account_root = account.serialize().unwrap();
+
+        let result = executor.execute_with_libs_and_params(
+            None,
+            &mut account_root,
+            ExecuteParams::default(),
+        );
+
+        assert!(result.is_err());
+        assert_numeric_cell_limits_cleared();
+        reset_cell_tls();
+    }
+
+    #[test]
+    fn execute_with_libs_and_params_resets_bloom_before_transaction_execution() {
+        reset_cell_tls();
+        let leaf = bloom_test_leaf();
+        warm_unique_bloom_with_leaf(&leaf);
+        let executor = BloomProbeExecutor::new(leaf);
+        let account = active_account(32);
+        let mut account_root = account.serialize().unwrap();
+
+        let (tx, minted_shell) = executor
+            .execute_with_libs_and_params(None, &mut account_root, ExecuteParams::default())
+            .unwrap();
+
+        assert_eq!(minted_shell, 1);
+        assert_eq!(tx.now(), 21);
+        assert_numeric_cell_limits_cleared();
+        reset_cell_tls();
+    }
+
+    #[test]
+    fn execute_with_libs_and_params_resets_bloom_after_transaction_execution() {
+        reset_cell_tls();
+        let leaf = bloom_test_leaf();
+        let executor = BloomProbeExecutor::new(leaf.clone());
+        let account = active_account(33);
+        let mut account_root = account.serialize().unwrap();
+
+        executor
+            .execute_with_libs_and_params(None, &mut account_root, ExecuteParams::default())
+            .unwrap();
+
+        assert_max_boc_size_exceeded(bloom_limited_parent_result(&leaf));
+        assert_numeric_cell_limits_cleared();
+        reset_cell_tls();
+    }
+
+    #[test]
+    fn execute_with_libs_and_params_result_is_independent_of_prior_bloom_state() {
+        reset_cell_tls();
+        let leaf = bloom_test_leaf();
+        let executor = BloomProbeExecutor::new(leaf.clone());
+        let mut cold_account_root = active_account(34).serialize().unwrap();
+        let (cold_tx, cold_minted_shell) = executor
+            .execute_with_libs_and_params(None, &mut cold_account_root, ExecuteParams::default())
+            .unwrap();
+
+        reset_cell_tls();
+        warm_unique_bloom_with_leaf(&leaf);
+        let mut warm_account_root = active_account(34).serialize().unwrap();
+        let (warm_tx, warm_minted_shell) = executor
+            .execute_with_libs_and_params(None, &mut warm_account_root, ExecuteParams::default())
+            .unwrap();
+
+        assert_eq!(cold_minted_shell, warm_minted_shell);
+        assert_eq!(cold_tx.now(), warm_tx.now());
+        assert_eq!(cold_tx.logical_time(), warm_tx.logical_time());
+        assert_numeric_cell_limits_cleared();
+        reset_cell_tls();
+    }
+
+    #[test]
+    fn node_params_available_credit_reaches_get_available_balance() {
+        for (available_credit, expected_balance) in [(0, 0), (42, 42), (INFINITY_CREDIT, 0)] {
+            let mut fixture = BuildActionsExecuteParamsFixture::regular();
+            fixture.available_credit = available_credit;
+
+            let (tx, minted_shell) = execute_node_contract(
+                &format!(
+                    "GETAVAILABLEBALANCE\n\
+                     PUSHINT {}\n\
+                     EQUAL\n\
+                     THROWIFNOT 201\n",
+                    expected_balance
+                ),
+                fixture.build(),
+            )
+            .unwrap();
+
+            let phase = vm_phase(&tx);
+            assert!(phase.success, "{phase:?}");
+            assert_eq!(phase.exit_code, 0);
+            assert_eq!(minted_shell, 0);
+        }
+    }
+
+    #[test]
+    fn node_params_dapp_id_reaches_my_dapp_id() {
+        let dapp_id = UInt256::with_array([0x31; 32]);
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.dapp_id = Some(dapp_id);
+
+        let (tx, _) = execute_node_contract(
+            "MYDAPPID\n\
+             PUSHINT 0x3131313131313131313131313131313131313131313131313131313131313131\n\
+             EQUAL\n\
+             THROWIFNOT 202\n",
+            fixture.build(),
+        )
+        .unwrap();
+
+        let phase = vm_phase(&tx);
+        assert!(phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, 0);
+    }
+
+    #[test]
+    fn node_params_missing_dapp_id_is_observable_in_my_dapp_id() {
+        let fixture = BuildActionsExecuteParamsFixture::regular();
+
+        let (tx, _) = execute_node_contract("MYDAPPID\n", fixture.build()).unwrap();
+
+        let phase = vm_phase(&tx);
+        assert!(!phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, ExceptionCode::DAppIdNotSet as i32);
+    }
+
+    #[test]
+    fn node_params_reached_termination_deadline_aborts_execution() {
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.termination_deadline = Some(Instant::now() - Duration::from_secs(1));
+
+        let err = execute_node_contract("PUSHINT 1\n", fixture.build()).unwrap_err();
+
+        assert!(matches!(
+            err.downcast_ref::<ExecutorError>(),
+            Some(ExecutorError::TerminationDeadlineReached)
+        ));
+    }
+
+    #[test]
+    fn node_params_zero_execution_timeout_reaches_vm_compute_phase() {
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.execution_timeout = Some(Duration::ZERO);
+
+        let (tx, _) = execute_node_contract("PUSHINT 1\n", fixture.build()).unwrap();
+
+        let phase = vm_phase(&tx);
+        assert!(!phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, ExceptionCode::ExecutionTimeout as i32);
+    }
+
+    #[test]
+    fn node_params_minted_shellq_limits_cover_zero_limited_and_infinite_credit() {
+        let (result, minted_shell, credited) = run_mint_shellq_action(0, 0, 20);
+        assert!(result.phase.success, "{:?}", result.phase);
+        assert_eq!(result.phase.spec_actions, 1);
+        assert_eq!(minted_shell, 0);
+        assert_eq!(credited, 0);
+
+        let (result, minted_shell, credited) = run_mint_shellq_action(13, 5, 20);
+        assert!(result.phase.success, "{:?}", result.phase);
+        assert_eq!(result.phase.spec_actions, 1);
+        assert_eq!(minted_shell, 13);
+        assert_eq!(credited, 8);
+
+        let (result, minted_shell, credited) = run_mint_shellq_action(INFINITY_CREDIT, 0, 20);
+        assert!(result.phase.success, "{:?}", result.phase);
+        assert_eq!(result.phase.spec_actions, 1);
+        assert_eq!(minted_shell, 20);
+        assert_eq!(credited, 20);
+    }
+
+    #[test]
+    fn node_params_engine_version_reaches_cross_dapp_exchange() {
+        let pre_1_0_3_balance = cross_dapp_exchange_balance(semver::Version::new(1, 0, 2));
+        let post_1_0_3_balance = cross_dapp_exchange_balance(semver::Version::new(1, 0, 3));
+
+        assert_eq!(currency_other_u64(&pre_1_0_3_balance, 2), 123);
+        assert_eq!(currency_other_u64(&post_1_0_3_balance, 2), 0);
+        assert_eq!(post_1_0_3_balance.grams.as_u128() - pre_1_0_3_balance.grams.as_u128(), 123);
+    }
+
+    #[test]
+    fn node_params_mvconfig_reaches_calc_mv_reward() {
+        let fixture = BuildActionsExecuteParamsFixture::regular();
+        let phase = compute_node_contract(
+            "CALCMVREWARD\n\
+             PUSHINT 0\n\
+             EQUAL\n\
+             THROWIFNOT 205\n",
+            calc_mv_reward_stack(),
+            fixture.build(),
+        );
+        assert!(phase.success, "{phase:?}");
+
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.mvconfig.set_config(vec![1, 3]);
+        let phase = compute_node_contract(
+            "CALCMVREWARD\n\
+             PUSHINT 0\n\
+             GREATER\n\
+             THROWIFNOT 206\n",
+            calc_mv_reward_stack(),
+            fixture.build(),
+        );
+        assert!(phase.success, "{phase:?}");
+    }
+
+    #[cfg(feature = "signature_with_id")]
+    #[test]
+    fn node_params_signature_id_reaches_chksignu() {
+        let signature_id = 17i32;
+        let data_hash = [0x42; 32];
+        let key = tvm_types::Ed25519KeyOption::from_private_key(&[0x11; 32]).unwrap();
+        let mut signed_data = signature_id.to_be_bytes().to_vec();
+        signed_data.extend_from_slice(&data_hash);
+        let signature = key.sign(&signed_data).unwrap();
+        let code = format!(
+            "PUSHINT 0x{}\n\
+             PUSHSLICE x{}\n\
+             PUSHINT 0x{}\n\
+             CHKSIGNU\n\
+             THROWIFNOT 203\n",
+            bytes_to_hex(&data_hash),
+            bytes_to_hex(&signature),
+            bytes_to_hex(key.pub_key().unwrap())
+        );
+
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.signature_id = signature_id;
+        let config = executor_config_with_capabilities(
+            0x572e | GlobalCapabilities::CapSignatureWithId as u64,
+        );
+        let (tx, _) =
+            execute_node_contract_with_config(&code, fixture.build(), config.clone()).unwrap();
+        let phase = vm_phase(&tx);
+        assert!(phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, 0);
+
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.signature_id = signature_id + 1;
+        let (tx, _) = execute_node_contract_with_config(&code, fixture.build(), config).unwrap();
+        let phase = vm_phase(&tx);
+        assert!(!phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, 203);
+    }
+
+    #[cfg(feature = "wasmtime")]
+    #[test]
+    fn node_params_wasm_hash_whitelist_reaches_run_wasm() {
+        let hash_str = "7b7f96a857a4ada292d7c6b1f47940dde33112a2c2bc15b577dff9790edaeef2";
+        let wasm_hash = bytes_from_hex(hash_str);
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.wasm_cache.wasm_binary_root_path = "../tvm_vm/config/wasm".to_owned();
+        fixture.wasm_cache.wasm_hash_whitelist.clear();
+        fixture.wasm_cache.wasm_engine =
+            tvm_vm::executor::Engine::extern_wasm_engine_init().unwrap();
+
+        let phase =
+            compute_node_contract("RUNWASM\n", run_wasm_hash_stack(&wasm_hash), fixture.build());
+        assert!(!phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, ExceptionCode::WasmWhitelistForbiddenHash as i32);
+    }
+
+    #[cfg(feature = "wasmtime")]
+    #[test]
+    fn node_params_wasm_whitelist_and_cache_allow_run_wasm() {
+        let hash_str = "7b7f96a857a4ada292d7c6b1f47940dde33112a2c2bc15b577dff9790edaeef2";
+        let wasm_hash: [u8; 32] = bytes_from_hex(hash_str).try_into().unwrap();
+        let wasm_engine = tvm_vm::executor::Engine::extern_wasm_engine_init().unwrap();
+        let wasm_hash_whitelist: std::collections::HashSet<[u8; 32]> =
+            [wasm_hash].into_iter().collect();
+        let wasm_component_cache =
+            tvm_vm::executor::Engine::extern_precompile_all_wasm_from_hash_list(
+                "../tvm_vm/config/wasm".to_owned(),
+                wasm_engine.clone(),
+                wasm_hash_whitelist.clone(),
+            );
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.wasm_cache.wasm_binary_root_path = "../tvm_vm/config/wasm".to_owned();
+        fixture.wasm_cache.wasm_engine = wasm_engine.clone();
+        fixture.wasm_cache.wasm_hash_whitelist = wasm_hash_whitelist.clone();
+        fixture.wasm_cache.wasm_component_cache = wasm_component_cache;
+
+        let phase =
+            compute_node_contract("RUNWASM\n", run_wasm_hash_stack(&wasm_hash), fixture.build());
+        assert!(phase.success, "{phase:?}");
+        assert_eq!(phase.exit_code, 0);
+
+        let wrong_binary = std::fs::read(
+            "../tvm_vm/config/wasm/65b6403f531ba6504e590905712af3208ddcba3d0c4ea4c003d1ef9685ec4947",
+        )
+        .unwrap();
+        let wrong_component =
+            wasmtime::component::Component::new(&wasm_engine, wrong_binary.as_slice()).unwrap();
+        let mut poisoned_cache = std::collections::HashMap::new();
+        poisoned_cache.insert(wasm_hash, wrong_component);
+        let mut fixture = BuildActionsExecuteParamsFixture::regular();
+        fixture.wasm_cache.wasm_binary_root_path = "../tvm_vm/config/wasm".to_owned();
+        fixture.wasm_cache.wasm_engine = wasm_engine;
+        fixture.wasm_cache.wasm_hash_whitelist = wasm_hash_whitelist;
+        fixture.wasm_cache.wasm_component_cache = poisoned_cache;
+
+        let phase =
+            compute_node_contract("RUNWASM\n", run_wasm_hash_stack(&wasm_hash), fixture.build());
+        assert!(!phase.success, "{phase:?}");
+        assert_ne!(phase.exit_code, 0);
+    }
+
+    #[test]
+    fn action_phase_caps_shell_minting_and_applies_dapp_config_action() {
+        let executor = DummyExecutor::new();
+        let mut account = active_account(8);
+        let mut tx = Transaction::with_address_and_status(address(8).address(), account.status());
+        let original_balance = account.balance().cloned().unwrap();
+        let mut acc_balance = original_balance.clone();
+        let mut msg_balance = CurrencyCollection::default();
+        let mut actions = OutActions::default();
+        actions.push_back(OutAction::new_mint_shellq(20));
+        actions.push_back(OutAction::send_to_dapp_config(5));
+        let mut minted_shell = 0;
+
+        let result = executor
+            .action_phase_with_copyleft(
+                &mut tx,
+                &mut account,
+                &original_balance,
+                &mut acc_balance,
+                &mut msg_balance,
+                &Grams::zero(),
+                actions.serialize().unwrap(),
+                None,
+                &address(8),
+                false,
+                13,
+                &mut minted_shell,
+                Grams::zero(),
+                Some(UInt256::with_array([0x99; 32])),
+            )
+            .unwrap();
+
+        assert!(result.phase.success, "{:?}", result.phase);
+        assert_eq!(result.phase.spec_actions, 2);
+        assert_eq!(minted_shell, 8);
+        assert_eq!(acc_balance.grams.as_u128(), original_balance.grams.as_u128() + 8);
+    }
+
+    #[test]
+    fn action_phase_sets_source_dapp_id_on_outbound_messages() {
+        let executor = DummyExecutor::new();
+        let mut account = active_account_with_code(8, byte_cell(0xaa));
+        let mut tx = Transaction::with_address_and_status(address(8).address(), account.status());
+        let original_balance = account.balance().cloned().unwrap();
+        let mut acc_balance = original_balance.clone();
+        let mut msg_balance = CurrencyCollection::default();
+        let dapp_id = UInt256::with_array([0x31; 32]);
+        let out_msg = Message::with_int_header(InternalMessageHeader::with_addresses(
+            address(8),
+            masterchain_address(9),
+            CurrencyCollection::with_grams(100_000_000),
+        ));
+        let mut actions = OutActions::default();
+        actions.push_back(OutAction::new_send(0, out_msg));
+        let mut minted_shell = 0;
+
+        let result = executor
+            .action_phase_with_copyleft(
+                &mut tx,
+                &mut account,
+                &original_balance,
+                &mut acc_balance,
+                &mut msg_balance,
+                &Grams::zero(),
+                actions.serialize().unwrap(),
+                None,
+                &address(8),
+                false,
+                0,
+                &mut minted_shell,
+                Grams::zero(),
+                Some(dapp_id.clone()),
+            )
+            .unwrap();
+
+        assert!(result.phase.success, "{:?}", result.phase);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].int_header().unwrap().src_dapp_id(), &Some(dapp_id));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn build_contract_info_uses_account_balance_address_and_seed() {
+        let executor = DummyExecutor::new();
+        let balance = CurrencyCollection::with_grams(123);
+        let addr = address(9);
+
+        let info =
+            executor.build_contract_info(&balance, &addr, 10, 20, 30, UInt256::with_array([7; 32]));
+
+        assert_eq!(info.capabilities, executor.config.raw_config().capabilities());
+        assert_eq!(info.unix_time(), 10);
+        assert_eq!(info.block_lt, 20);
+        assert_eq!(info.trans_lt, 30);
+        assert_eq!(info.balance, balance);
+        assert_eq!(info.config_params, None);
+        assert_eq!(
+            info.myself,
+            SliceData::load_builder(addr.write_to_new_cell().unwrap()).unwrap()
+        );
+        assert_ne!(info.rand_seed, Default::default());
+    }
+
+    #[test]
+    fn storage_phase_rejects_transaction_time_older_than_last_paid() {
+        let executor = DummyExecutor::new();
+        let mut account =
+            Account::with_address_and_ballance(&address(3), &CurrencyCollection::with_grams(1));
+        account.set_last_paid(10);
+        let mut balance = CurrencyCollection::with_grams(1);
+        let mut tx = Transaction::with_address_and_status(address(3).address(), account.status());
+        tx.set_now(9);
+
+        let err = executor
+            .storage_phase(&mut account, &mut balance, &mut tx, false, false, false)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("transaction timestamp must be greater then account timestamp")
+        );
+    }
+
+    #[test]
+    fn storage_phase_special_account_skips_fee_collection() {
+        let executor = DummyExecutor::new();
+        let mut account =
+            Account::with_address_and_ballance(&address(4), &CurrencyCollection::with_grams(25));
+        let mut balance = CurrencyCollection::with_grams(25);
+        let mut tx = Transaction::with_address_and_status(address(4).address(), account.status());
+        tx.set_now(10);
+
+        let phase = executor
+            .storage_phase(&mut account, &mut balance, &mut tx, false, true, false)
+            .unwrap();
+
+        assert_eq!(phase.storage_fees_collected.as_u128(), 0);
+        assert_eq!(phase.status_change, AccStatusChange::Unchanged);
+        assert_eq!(balance.grams.as_u128(), 25);
+    }
+
+    #[test]
+    fn credit_phase_collects_due_payment_and_updates_balances() {
+        let executor = DummyExecutor::new();
+        let mut account = Account::with_address(address(5));
+        account.set_due_payment(Some(30u64.into()));
+        let mut tx = Transaction::with_address_and_status(address(5).address(), account.status());
+        let mut msg_balance = CurrencyCollection::with_grams(100);
+        let mut acc_balance = CurrencyCollection::with_grams(7);
+
+        let phase = executor
+            .credit_phase(&mut account, &mut tx, &mut msg_balance, &mut acc_balance)
+            .unwrap();
+
+        assert_eq!(phase.due_fees_collected.unwrap().as_u128(), 30);
+        assert_eq!(msg_balance.grams.as_u128(), 70);
+        assert_eq!(acc_balance.grams.as_u128(), 77);
+        assert!(account.due_payment().is_none());
+        assert_eq!(tx.total_fees().grams.as_u128(), 30);
+    }
+
+    #[test]
+    fn address_helpers_cover_replace_length_and_rewrite_cases() {
+        let acc = address(6);
+        assert_eq!(check_replace_src_addr(&None, &acc), Some(&acc));
+        assert_eq!(check_replace_src_addr(&Some(acc.clone()), &acc), Some(&acc));
+        assert!(check_replace_src_addr(&Some(address(7)), &acc).is_none());
+
+        let variant = MsgAddressInt::with_variant(None, 0, SliceData::new(vec![0x80])).unwrap();
+        assert!(check_replace_src_addr(&Some(variant), &acc).is_none());
+
+        assert!(is_valid_addr_len(256, 256, 256, 0));
+        assert!(is_valid_addr_len(32, 8, 40, 8));
+        assert!(!is_valid_addr_len(9, 8, 40, 8));
+
+        let config = BlockchainConfig::default();
+        let dst =
+            MsgAddressInt::with_variant(None, -1, UInt256::with_array([8; 32]).into()).unwrap();
+        let rewritten = check_rewrite_dest_addr(&dst, &config, &acc).unwrap();
+        assert!(matches!(rewritten, MsgAddressInt::AddrStd(_)));
+        assert_eq!(rewritten.workchain_id(), -1);
+
+        let anycast = AnycastInfo::with_rewrite_pfx(
+            SliceData::load_builder(BuilderData::with_raw(vec![0x80], 1).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let anycast_dst =
+            MsgAddressInt::with_standart(Some(anycast), -1, UInt256::with_array([9; 32]).into())
+                .unwrap();
+        assert_eq!(
+            check_rewrite_dest_addr(&anycast_dst, &config, &acc).unwrap_err(),
+            IncorrectCheckRewrite::Anycast
+        );
+
+        let short_dst = MsgAddressInt::with_variant(None, -1, SliceData::new(vec![0x80])).unwrap();
+        assert_eq!(
+            check_rewrite_dest_addr(&short_dst, &config, &acc).unwrap_err(),
+            IncorrectCheckRewrite::Other
+        );
+    }
+
+    #[test]
+    fn reserve_action_handler_covers_success_and_error_modes() {
+        let mut reserve = CurrencyCollection::with_grams(10);
+        let mut balance = CurrencyCollection::with_grams(100);
+        let mut need_to_reserve = 5;
+        let reserved =
+            reserve_action_handler(0, &mut reserve, &mut balance, &mut need_to_reserve).unwrap();
+        assert_eq!(reserved.grams.as_u128(), 15);
+        assert_eq!(balance.grams.as_u128(), 85);
+        assert_eq!(need_to_reserve, 0);
+
+        let mut reserve_all_but = CurrencyCollection::with_grams(30);
+        let mut balance = CurrencyCollection::with_grams(90);
+        let mut need_to_reserve = 0;
+        let reserved = reserve_action_handler(
+            RESERVE_ALL_BUT,
+            &mut reserve_all_but,
+            &mut balance,
+            &mut need_to_reserve,
+        )
+        .unwrap();
+        assert_eq!(reserved.grams.as_u128(), 60);
+        assert_eq!(balance.grams.as_u128(), 30);
+
+        let mut reserve = CurrencyCollection::with_grams(1);
+        let mut balance = CurrencyCollection::with_grams(1);
+        let mut need_to_reserve = 0;
+        assert_eq!(
+            reserve_action_handler(
+                RESERVE_ALL_BUT + 1,
+                &mut reserve,
+                &mut balance,
+                &mut need_to_reserve
+            )
+            .unwrap_err(),
+            RESULT_CODE_UNKNOWN_OR_INVALID_ACTION
+        );
+
+        let mut reserve = CurrencyCollection::with_grams(10);
+        let mut balance = CurrencyCollection::with_grams(5);
+        assert_eq!(
+            reserve_action_handler(0, &mut reserve, &mut balance, &mut 0).unwrap_err(),
+            RESULT_CODE_NOT_ENOUGH_GRAMS
+        );
+    }
+
+    #[test]
+    fn code_and_library_handlers_cover_success_and_bad_state() {
+        let replacement = byte_cell(0x22);
+
+        let mut empty = Account::default();
+        assert_eq!(
+            setcode_action_handler(&mut empty, replacement.clone()),
+            Some(RESULT_CODE_BAD_ACCOUNT_STATE)
+        );
+        assert_eq!(
+            change_library_action_handler(&mut empty, 1, Some(replacement.clone()), None),
+            Some(RESULT_CODE_BAD_ACCOUNT_STATE)
+        );
+
+        let mut account = active_account(0x11);
+        assert_eq!(setcode_action_handler(&mut account, replacement.clone()), None);
+        assert_eq!(account.get_code().unwrap().repr_hash(), replacement.repr_hash());
+
+        let library = byte_cell(0x33);
+        assert_eq!(
+            change_library_action_handler(&mut account, 1, Some(library.clone()), None),
+            None
+        );
+        assert_eq!(
+            change_library_action_handler(&mut account, 0, None, Some(library.repr_hash())),
+            None
+        );
+        assert_eq!(
+            change_library_action_handler(&mut account, 1, None, None),
+            Some(RESULT_CODE_BAD_ACCOUNT_STATE)
+        );
+    }
+
+    #[test]
+    fn account_from_message_init_gas_and_formatting_helpers_cover_common_paths() {
+        let src = address(1);
+        let dst = address(2);
+        let grams = CurrencyCollection::with_grams(50);
+
+        let bounce_msg =
+            Message::with_int_header(InternalMessageHeader::with_addresses_and_bounce(
+                src.clone(),
+                dst.clone(),
+                grams.clone(),
+                true,
+            ));
+        assert!(account_from_message(&bounce_msg, &grams, true, false, false).is_none());
+
+        let create_msg =
+            Message::with_int_header(InternalMessageHeader::with_addresses_and_bounce(
+                src,
+                dst.clone(),
+                grams.clone(),
+                false,
+            ));
+        let created = account_from_message(&create_msg, &grams, true, false, false).unwrap();
+        assert_eq!(created.status(), AccountStatus::AccStateUninit);
+        assert_eq!(created.get_id().unwrap(), dst.address());
+
+        let gas_info = GasLimitsPrices {
+            gas_price: 1 << 16,
+            gas_limit: 100,
+            special_gas_limit: 77,
+            gas_credit: 25,
+            flat_gas_limit: 10,
+            flat_gas_price: 10,
+            max_gas_threshold: 1000,
+            ..GasLimitsPrices::default()
+        };
+        let external = init_gas(200, 50, true, false, true, &gas_info);
+        assert_eq!(external.get_gas_limit(), 50);
+        assert_eq!(external.get_gas_credit(), 25);
+        let special = init_gas(200, 50, false, true, true, &gas_info);
+        assert_eq!(special.get_gas_limit_max(), 77);
+        assert_eq!(special.get_gas_limit(), 50);
+
+        assert_eq!(
+            balance_to_string(&CurrencyCollection::with_grams(1_234_567_890)),
+            "1.234 567 890      (1234567890)"
+        );
+        assert_eq!(action_type(&OutAction::SetCode { new_code: Cell::default() }), "SetCode");
+        assert_eq!(action_type(&OutAction::None), "Unknown");
+    }
+
+    // ===== Athens E2E: finalizeDeposit -> opcode 0x4A -> mint (link 4) =====
+    #[test]
+    fn athens_finalize_deposit_reaches_mint() {
+        let tvc_path = "/home/sergey/Pruvendo/gosh/acki-nacki/contracts/0.79.3_compiled/exchange/TokenBridge.tvc";
+        let msg_path = "/tmp/deposit_e2e/live_finalize_msg.boc";
+        if !std::path::Path::new(tvc_path).exists() || !std::path::Path::new(msg_path).exists() {
+            eprintln!("ATHENS: artifacts missing, skipping");
+            return;
+        }
+        // Make the opcode's external verifier discoverable (fallback path is also baked
+        // in).
+        std::env::set_var(
+            "AN_RLC_VERIFY_BIN",
+            "/home/sergey/Pruvendo/gosh/acki-nacki-bridge/deposit-prover/target/release/an_rlc_verify",
+        );
+        std::env::set_var(
+            "AN_RLC_SRS_DIR",
+            "/home/sergey/Pruvendo/gosh/acki-nacki-bridge/deposit-prover/data",
+        );
+
+        let state_init = StateInit::construct_from_file(tvc_path).expect("load TokenBridge.tvc");
+        // Athens: sync tvm.pubkey() with the key that signed live_finalize_msg.boc.
+        // TVM-Solidity stores pubkey as the first 256 bits of the data cell root.
+        let mut state_init = state_init;
+        let signer_pubkey: [u8; 32] = [
+            0x23, 0x47, 0x18, 0x31, 0xb2, 0x7e, 0xe8, 0xca, 0x2b, 0xa1, 0x95, 0x6e, 0x3d, 0x58,
+            0x85, 0x04, 0xcb, 0xfb, 0x8e, 0xa4, 0x4b, 0xf3, 0x59, 0x3d, 0x5c, 0x3a, 0x1c, 0xc6,
+            0x8b, 0xd6, 0xb9, 0xd9,
+        ];
+        if let Some(old_data) = state_init.data.clone() {
+            let old_slice = SliceData::load_cell_ref(&old_data).expect("load data slice");
+            // Rebuild data: replace first 256 bits with signer pubkey, keep the rest.
+            let mut bldr = BuilderData::new();
+            bldr.append_raw(&signer_pubkey, 256).expect("append pubkey");
+            let mut rest = old_slice.clone();
+            let total = rest.remaining_bits();
+            if total > 256 {
+                rest.move_by(256).expect("skip old pubkey");
+                let tail = rest.get_next_bits(total - 256).expect("tail bits");
+                bldr.append_raw(&tail, total - 256).expect("append tail");
+            }
+            for i in 0..old_slice.remaining_references() {
+                bldr.checked_append_reference(old_data.reference(i).unwrap()).expect("ref");
+            }
+            state_init.set_data(bldr.into_cell().expect("build data cell"));
+            eprintln!("ATHENS: injected signer pubkey into account data");
+        }
+        // Deploy account at the destination address used by finalize_msg.boc
+        // (0x3434..34).
+        let account = Account::active_by_init_code_hash(
+            address(0x34),
+            CurrencyCollection::with_grams(100_000_000_000),
+            0,
+            state_init,
+            false,
+        )
+        .expect("build active account");
+        let mut account_root = account.serialize().expect("serialize account");
+
+        let msg = Message::construct_from_file(msg_path).expect("load finalize_msg.boc");
+
+        let executor = OrdinaryTransactionExecutor::new(executor_config());
+        let last_tr_lt = Arc::new(AtomicU64::new(1_000_000));
+        // Athens: trace executed instructions to see how far compute gets.
+        let trace_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let saw_opcode: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let tl = trace_log.clone();
+        let so = saw_opcode.clone();
+        let trace_cb: Arc<tvm_vm::executor::TraceCallback> = Arc::new(move |_e, info| {
+            if info.has_cmd() {
+                let mut v = tl.lock().unwrap();
+                if v.len() < 100000 {
+                    v.push(format!("step {} gas {}: {}", info.step, info.gas_used, info.cmd_str));
+                }
+                if info.cmd_str.contains("ZKHALO2") {
+                    *so.lock().unwrap() = true;
+                }
+            }
+        });
+        let params = ExecuteParams {
+            block_unixtime: 1_780_357_300,
+            block_lt: 2_000_000,
+            seq_no: 1,
+            last_tr_lt: last_tr_lt.clone(),
+            seed_block: UInt256::with_array([0x11; 32]),
+            debug: true,
+            trace_callback: Some(trace_cb),
+            ..ExecuteParams::default()
+        };
+
+        let res = executor.execute_with_libs_and_params(Some(&msg), &mut account_root, params);
+        {
+            let v = trace_log.lock().unwrap();
+            eprintln!("ATHENS: total traced instructions = {}", v.len());
+            eprintln!("ATHENS: saw ZKHALO2 opcode = {}", *saw_opcode.lock().unwrap());
+            let n = v.len();
+            let start = if n > 25 { n - 25 } else { 0 };
+            eprintln!("ATHENS: --- last {} instructions ---", n - start);
+            for line in &v[start..] {
+                eprintln!("ATHENS:   {}", line);
+            }
+        }
+        match res {
+            Ok((tx, minted_shell)) => {
+                eprintln!("ATHENS: transaction executed OK, minted_shell={}", minted_shell);
+                match tx.read_description().expect("description") {
+                    TransactionDescr::Ordinary(d) => {
+                        match &d.compute_ph {
+                            TrComputePhase::Vm(vm) => {
+                                eprintln!(
+                                    "ATHENS: COMPUTE success={} exit_code={} gas_used={} vm_steps={}",
+                                    vm.success, vm.exit_code, vm.gas_used, vm.vm_steps
+                                );
+                            }
+                            TrComputePhase::Skipped(s) => {
+                                eprintln!("ATHENS: COMPUTE SKIPPED reason={:?}", s.reason);
+                            }
+                        }
+                        match &d.action {
+                            Some(a) => eprintln!(
+                                "ATHENS: ACTION success={} result_code={} tot_actions={} msgs_created={}",
+                                a.success, a.result_code, a.tot_actions, a.msgs_created
+                            ),
+                            None => eprintln!("ATHENS: no action phase"),
+                        }
+                        eprintln!("ATHENS: aborted={}", d.aborted);
+                    }
+                    other => eprintln!("ATHENS: unexpected descr {:?}", other),
+                }
+            }
+            Err(e) => {
+                eprintln!("ATHENS: executor returned Err: {:?}", e);
+            }
+        }
+    }
+}

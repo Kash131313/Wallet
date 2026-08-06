@@ -1,0 +1,282 @@
+// Copyright (C) 2019-2021 TON Labs. All Rights Reserved.
+//
+// Licensed under the SOFTWARE EVALUATION License (the "License"); you may not
+// use this file except in compliance with the License.
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific TON DEV software governing permissions and
+// limitations under the License.
+
+use std::fmt;
+
+use tvm_types::Result;
+use tvm_types::types::ExceptionCode;
+
+use crate::stack::StackItem;
+use crate::stack::integer::IntegerData;
+
+#[derive(Clone, PartialEq)]
+enum ExceptionType {
+    System(ExceptionCode),
+    Custom(i32),
+}
+
+impl ExceptionType {
+    fn is_normal_termination(&self) -> Option<i32> {
+        match self {
+            ExceptionType::System(ExceptionCode::NormalTermination) | ExceptionType::Custom(0) => {
+                Some(0)
+            }
+            ExceptionType::System(ExceptionCode::AlternativeTermination)
+            | ExceptionType::Custom(1) => Some(1),
+            _ => None,
+        }
+    }
+
+    fn exception_code(&self) -> Option<ExceptionCode> {
+        if let ExceptionType::System(code) = self { Some(*code) } else { None }
+    }
+
+    fn custom_code(&self) -> Option<i32> {
+        if let ExceptionType::Custom(code) = self { Some(*code) } else { None }
+    }
+
+    pub fn exception_or_custom_code(&self) -> i32 {
+        match self {
+            ExceptionType::System(code) => *code as i32,
+            ExceptionType::Custom(code) => *code,
+        }
+    }
+
+    fn exception_message(&self) -> String {
+        match self {
+            ExceptionType::System(code) => format!("{}, code {}", code, *code as u8),
+            ExceptionType::Custom(code) => format!("code {}", code),
+        }
+    }
+}
+
+// Exceptions *****************************************************************
+#[derive(Clone, PartialEq)]
+pub struct Exception {
+    exception: ExceptionType,
+    pub value: StackItem,
+    pub file: &'static str,
+    pub line: u32,
+}
+
+impl From<ExceptionCode> for Exception {
+    fn from(code: ExceptionCode) -> Self {
+        Exception::from_code(code, file!(), line!())
+    }
+}
+
+impl Exception {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}, value {}, file {}:{}",
+            self.exception.exception_message(),
+            self.value,
+            self.file,
+            self.line
+        )
+    }
+
+    pub fn from_code(code: ExceptionCode, file: &'static str, line: u32) -> Exception {
+        Self::from_code_and_value(code, 0, file, line)
+    }
+
+    pub fn from_code_and_value(
+        code: ExceptionCode,
+        value: impl Into<IntegerData>,
+        file: &'static str,
+        line: u32,
+    ) -> Exception {
+        // panic!("{} {} {}:{}", code, IntegerData::from(value), file, line)
+        Exception {
+            exception: ExceptionType::System(code),
+            value: StackItem::integer(value.into()),
+            file,
+            line,
+        }
+    }
+
+    pub fn from_number_and_value(
+        number: usize,
+        value: StackItem,
+        file: &'static str,
+        line: u32,
+    ) -> Exception {
+        Exception { exception: ExceptionType::Custom(number as i32), value, file, line }
+    }
+
+    pub fn exception_code(&self) -> Option<ExceptionCode> {
+        self.exception.exception_code()
+    }
+
+    pub fn custom_code(&self) -> Option<i32> {
+        self.exception.custom_code()
+    }
+
+    pub fn exception_or_custom_code(&self) -> i32 {
+        self.exception.exception_or_custom_code()
+    }
+
+    pub fn is_normal_termination(&self) -> Option<i32> {
+        self.exception.is_normal_termination()
+    }
+}
+
+macro_rules! exception {
+    ($code:expr) => {
+        error!(
+            TvmError::TvmExceptionFull(
+                Exception::from_code($code, file!(), line!()),
+                String::new()
+            )
+        )
+    };
+    ($code:expr, $msg:literal, $($arg:tt)*) => {
+        error!(
+            TvmError::TvmExceptionFull(
+                Exception::from_code($code, file!(), line!()),
+                format!($msg, $($arg)*)
+            )
+        )
+    };
+    ($code:expr, $value:expr, $msg:literal, $($arg:tt)*) => {
+        error!(
+            TvmError::TvmExceptionFull(
+                Exception::from_code_and_value($code, $value, file!(), line!()),
+                format!($msg, $($arg)*)
+            )
+        )
+    };
+    ($code:expr, $value:expr, $msg:literal) => {
+        error!(
+            TvmError::TvmExceptionFull(
+                Exception::from_code_and_value($code, $value, file!(), line!()),
+                $msg.to_string()
+            )
+        )
+    };
+    ($code:expr, $msg:literal) => {
+        error!(
+            TvmError::TvmExceptionFull(
+                Exception::from_code($code, file!(), line!()),
+                $msg.to_string()
+            )
+        )
+    };
+    ($code:expr, $file:expr, $line:expr) => {
+        error!(
+            TvmError::TvmExceptionFull(
+               Exception::from_code($code, $file, $line),
+               String::new()
+            )
+        )
+    };
+}
+
+macro_rules! err {
+    ($code:expr) => {
+        Err(exception!($code))
+    };
+    ($code:expr, $msg:literal, $($arg:tt)*) => {{
+        Err(exception!($code, $msg, $($arg)*))
+    }};
+    ($msg:literal, $($arg:tt)*) => {{
+        Err(exception!(ExceptionCode::FatalError, $msg, $($arg)*))
+    }};
+    ($code:expr, $msg:literal) => {{
+        Err(exception!($code, $msg))
+    }};
+    ($code:expr, $file:expr, $line:expr) => {
+        Err(exception!($code, $file, $line))
+    };
+}
+
+#[cfg(test)]
+macro_rules! custom_err {
+    ($code:expr, $msg:literal, $($arg:tt)*) => {
+        return Err(
+            error!(
+                TvmError::TvmExceptionFull(
+                    Exception::from_number_and_value($code, Default::default(), file!(), line!()),
+                    format!($msg, $($arg)*)
+                )
+            )
+        )
+    };
+}
+
+impl fmt::Display for Exception {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}, value: {} {}:{}",
+            self.exception.exception_message(),
+            self.value,
+            self.file,
+            self.line
+        )
+    }
+}
+
+impl fmt::Debug for Exception {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        Exception::fmt(self, f)
+    }
+}
+
+pub(crate) type ResultMut<'a, T> = Result<&'a mut T>;
+pub(crate) type ResultOpt<T> = Result<Option<T>>;
+pub(crate) type ResultRef<'a, T> = Result<&'a T>;
+pub(crate) type ResultVec<T> = Result<Vec<T>>;
+pub(crate) type Status = Result<()>;
+
+#[cfg(test)]
+mod tests {
+    use tvm_types::ExceptionCode;
+
+    use super::*;
+
+    #[test]
+    fn exception_codes_and_normal_termination_are_reported() {
+        let normal = Exception::from_code(ExceptionCode::NormalTermination, file!(), line!());
+        assert_eq!(normal.exception_code(), Some(ExceptionCode::NormalTermination));
+        assert_eq!(normal.custom_code(), None);
+        assert_eq!(normal.is_normal_termination(), Some(0));
+
+        let alt = Exception::from_number_and_value(1, StackItem::int(7), file!(), line!());
+        assert_eq!(alt.exception_code(), None);
+        assert_eq!(alt.custom_code(), Some(1));
+        assert_eq!(alt.is_normal_termination(), Some(1));
+    }
+
+    #[test]
+    fn exception_or_custom_code_matches_underlying_variant() {
+        let system =
+            Exception::from_code_and_value(ExceptionCode::RangeCheckError, 10, file!(), line!());
+        assert_eq!(system.exception_or_custom_code(), ExceptionCode::RangeCheckError as i32);
+
+        let custom = Exception::from_number_and_value(77, StackItem::int(9), file!(), line!());
+        assert_eq!(custom.exception_or_custom_code(), 77);
+    }
+
+    #[test]
+    fn display_and_debug_include_message_value_and_location() {
+        let err = Exception::from_number_and_value(42, StackItem::int(3), "some/file.rs", 123_u32);
+        let display = format!("{}", err);
+        let debug = format!("{:?}", err);
+
+        assert!(display.contains("code 42"));
+        assert!(display.contains("value: 3"));
+        assert!(display.contains("some/file.rs:123"));
+        assert!(debug.contains("code 42"));
+        assert!(debug.contains("value 3"));
+    }
+}

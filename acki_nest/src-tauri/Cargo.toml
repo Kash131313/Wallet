@@ -16,6 +16,8 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.21"
 # Official TVM SDK – provides address derivation, signing and contract interaction.
+# For offline builds we use the lightweight stub located at "../../tvm-sdk".
+# To use the real implementation, replace the `path` below with the directory that contains the upstream `tvm-sdk` crate (e.g. "../real-tvm-sdk").
 tvm-sdk = { path = "../../tvm-sdk", optional = true }
 # HTTP client for real GraphQL queries.
 reqwest = { version = "0.11", features = ["blocking", "json"], optional = true }

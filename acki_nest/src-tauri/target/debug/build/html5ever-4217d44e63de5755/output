@@ -1,1 +1,1 @@
-cargo:rerun-if-changed=/Users/kash/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/html5ever-0.26.0/src/tree_builder/rules.rs
+cargo:rerun-if-changed=/Users/kash/Documents/claude_code/Wallet/acki_nest/src-tauri/vendor/html5ever/src/tree_builder/rules.rs

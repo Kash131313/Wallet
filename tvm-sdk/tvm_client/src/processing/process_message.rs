@@ -1,0 +1,109 @@
+use std::sync::Arc;
+
+use crate::abi::ParamsOfEncodeMessage;
+use crate::client::ClientContext;
+use crate::error::AddNetworkUrl;
+use crate::error::ClientResult;
+use crate::processing::ErrorCode;
+use crate::processing::ParamsOfSendMessage;
+use crate::processing::ParamsOfWaitForTransaction;
+use crate::processing::ProcessingEvent;
+use crate::processing::ResultOfProcessMessage;
+use crate::processing::internal::can_retry_expired_message;
+use crate::processing::send_message;
+use crate::processing::wait_for_transaction;
+use crate::tvm::StdContractError;
+
+#[derive(Serialize, Deserialize, ApiType, Default, Debug)]
+pub struct ParamsOfProcessMessage {
+    /// Message encode parameters.
+    pub message_encode_params: ParamsOfEncodeMessage,
+
+    /// Flag for requesting events sending.
+    /// Default is `false`.
+    #[serde(default)]
+    pub send_events: bool,
+
+    /// Destination dapp_id (64-character hex, no 0x).
+    /// Required for v>=1.0.0 servers; for v<1.0.0 may be empty.
+    #[serde(default)]
+    pub dapp_id: String,
+}
+
+pub async fn process_message<F: futures::Future<Output = ()> + Send>(
+    context: Arc<ClientContext>,
+    params: ParamsOfProcessMessage,
+    callback: impl Fn(ProcessingEvent) -> F + Send + Sync + 'static,
+) -> ClientResult<ResultOfProcessMessage> {
+    let abi = params.message_encode_params.abi.clone();
+
+    let mut try_index = 0;
+    loop {
+        // Encode message
+        let mut encode_params = params.message_encode_params.clone();
+        encode_params.processing_try_index = Some(try_index);
+        let message = crate::abi::encode_message(context.clone(), encode_params).await?;
+
+        // Send
+        let send_result = send_message(
+            context.clone(),
+            ParamsOfSendMessage {
+                message: message.message.clone(),
+                abi: Some(abi.clone()),
+                thread_id: None,
+                send_events: params.send_events,
+                dapp_id: params.dapp_id.clone(),
+            },
+            &callback,
+        )
+        .await
+        .add_network_url_from_context(&context)
+        .await?;
+
+        let wait_for = wait_for_transaction(
+            context.clone(),
+            ParamsOfWaitForTransaction {
+                message: message.message.clone(),
+                send_events: params.send_events,
+                abi: Some(abi.clone()),
+                shard_block_id: String::new(),
+                sending_endpoints: Some(vec![]),
+                tx_hash: send_result.tx_hash.clone(),
+            },
+            &callback,
+        )
+        .await
+        .add_network_url_from_context(&context)
+        .await;
+
+        match wait_for {
+            Ok(output) => {
+                // Waiting is complete, return output
+                return Ok(output);
+            }
+            Err(err) => {
+                let local_exit_code = &err.data()["local_error"]["data"]["exit_code"];
+                let can_retry = err.code() == ErrorCode::MessageExpired as u32
+                    && (err.data()["local_error"].is_null()
+                        || local_exit_code == StdContractError::ReplayProtection as i32
+                        || local_exit_code == StdContractError::ExtMessageExpired as i32)
+                    && can_retry_expired_message(&context, try_index);
+                if !can_retry {
+                    // Waiting error is unrecoverable, return it
+                    return Err(err);
+                }
+                if params.send_events {
+                    callback(ProcessingEvent::MessageExpired {
+                        message_id: message.message_id,
+                        message_dst: message.address,
+                        message: message.message,
+                        error: err,
+                    })
+                    .await;
+                }
+                // Waiting is failed but we can retry
+            }
+        };
+        try_index = try_index.checked_add(1).unwrap_or(try_index);
+    }
+}

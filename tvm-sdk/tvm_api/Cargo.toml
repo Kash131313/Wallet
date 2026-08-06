@@ -1,0 +1,30 @@
+[package]
+name = "tvm_api"
+description = "Minimal wrappers for TVM serialization using TL-schema"
+#
+version.workspace = true
+rust-version.workspace = true
+#
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+byteorder.workspace = true
+extfmt.workspace = true
+hex.workspace = true
+lazy_static = { workspace = true, optional = true }
+serde.workspace = true
+serde_derive.workspace = true
+thiserror.workspace = true
+#
+tvm_block = { workspace = true, optional = true }
+tvm_types.workspace = true
+
+ordered-float = { version = "4", optional = true }
+secstr = "0.5"
+
+[features]
+bytes_as_vec = []
+ton = ["dep:lazy_static", "dep:ordered-float", "dep:tvm_block"]
